@@ -206,6 +206,25 @@ struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   // priors (e.g. GeoCalib) with their uncertainties.
   std::unordered_map<camera_t, Eigen::Vector2d> focal_priors;
 
+  // Optional soft gravity priors: image_id -> unit gravity-down direction in
+  // that image's camera frame. Adds two whitened tangent-space residuals on
+  // the frame rotation, pulling the reconstruction's down direction toward
+  // the prior. Assumes a gravity-aligned reconstruction gauge (world z up,
+  // down_world = -e_z), as produced by gravity-aware rotation averaging.
+  std::unordered_map<image_t, Eigen::Vector3d> gravity_priors;
+
+  // Optional per-image 3x3 covariance of the gravity direction (camera
+  // frame, rank-2 tangent to the direction). Images without an entry fall
+  // back to gravity_prior_sigma_deg.
+  std::unordered_map<image_t, Eigen::Matrix3d> gravity_covariances;
+
+  // Global scale on the gravity prior information matrix (1/covariance).
+  double gravity_prior_weight = 1.0;
+
+  // Isotropic tangent-space sigma (in degrees) for gravity priors without a
+  // per-image covariance.
+  double gravity_prior_sigma_deg = 1.0;
+
   // Whether to print a final summary.
   bool print_summary = true;
 

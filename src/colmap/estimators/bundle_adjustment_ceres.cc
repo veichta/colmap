@@ -34,12 +34,15 @@
 #include "colmap/estimators/cost_functions/pose_prior.h"
 #include "colmap/estimators/cost_functions/reprojection_error.h"
 #include "colmap/estimators/cost_functions/utils.h"
+#include "colmap/math/math.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
 #include <iomanip>
+
+#include <Eigen/Cholesky>
 
 namespace colmap {
 
@@ -640,6 +643,45 @@ class FocalPriorCostFunction : public ceres::CostFunction {
   const double inv_sigma_;
 };
 
+// Soft gravity prior: whitened tangent-space residual between the
+// reconstruction's gravity-down direction in the camera frame and the
+// per-image prior direction. Assumes a gravity-aligned reconstruction gauge
+// (world z up), as produced by gravity-aware rotation averaging (see
+// BundleAdjustmentOptions::gravity_priors). The parameter block is the
+// frame's rig_from_world (quaternion x, y, z, w + translation); the residual
+// is invariant to yaw about the world z axis by construction.
+struct GravityPriorCostFunctor {
+  GravityPriorCostFunctor(const Eigen::Matrix3d& cam_from_rig_rot,
+                          const Eigen::Matrix<double, 2, 3>& whitened_tangent)
+      : cam_from_rig_rot_(cam_from_rig_rot),
+        whitened_tangent_(whitened_tangent) {}
+
+  template <typename T>
+  bool operator()(const T* const rig_from_world, T* residuals) const {
+    const Eigen::Quaternion<T> rig_from_world_rotation(rig_from_world[3],
+                                                       rig_from_world[0],
+                                                       rig_from_world[1],
+                                                       rig_from_world[2]);
+    const Eigen::Matrix<T, 3, 1> down_world(T(0), T(0), T(-1));
+    const Eigen::Matrix<T, 3, 1> down_cam =
+        cam_from_rig_rot_.cast<T>() * (rig_from_world_rotation * down_world);
+    const Eigen::Matrix<T, 2, 1> res = whitened_tangent_.cast<T>() * down_cam;
+    residuals[0] = res(0);
+    residuals[1] = res(1);
+    return true;
+  }
+
+  static ceres::CostFunction* Create(
+      const Eigen::Matrix3d& cam_from_rig_rot,
+      const Eigen::Matrix<double, 2, 3>& whitened_tangent) {
+    return new ceres::AutoDiffCostFunction<GravityPriorCostFunctor, 2, 7>(
+        new GravityPriorCostFunctor(cam_from_rig_rot, whitened_tangent));
+  }
+
+  const Eigen::Matrix3d cam_from_rig_rot_;
+  const Eigen::Matrix<double, 2, 3> whitened_tangent_;
+};
+
 class DefaultBundleAdjuster : public CeresBundleAdjuster {
  public:
   DefaultBundleAdjuster(const BundleAdjustmentOptions& options,
@@ -692,6 +734,56 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
           camera.params.data());
       VLOG(2) << "Added focal prior " << prior[0] << " (sigma " << prior[1]
               << ") for camera " << camera_id;
+    }
+
+    // Add soft gravity priors on frame rotations.
+    if (!options_.gravity_priors.empty()) {
+      const double default_sigma = DegToRad(options_.gravity_prior_sigma_deg);
+      int num_gravity_priors = 0;
+      for (const auto& [image_id, gravity] : options_.gravity_priors) {
+        if (parameterized_image_ids_.count(image_id) == 0) {
+          continue;
+        }
+        Image& image = reconstruction.Image(image_id);
+        Rigid3d& rig_from_world = image.FramePtr()->RigFromWorld();
+        if (!problem_->HasParameterBlock(rig_from_world.params.data())) {
+          continue;
+        }
+        const sensor_t sensor_id = image.CameraPtr()->SensorId();
+        Eigen::Matrix3d cam_from_rig_rot = Eigen::Matrix3d::Identity();
+        if (!image.FramePtr()->RigPtr()->IsRefSensor(sensor_id)) {
+          cam_from_rig_rot = image.FramePtr()
+                                 ->RigPtr()
+                                 ->SensorFromRig(sensor_id)
+                                 .rotation()
+                                 .toRotationMatrix();
+        }
+        const Eigen::Vector3d g = gravity.normalized();
+        Eigen::Matrix<double, 3, 2> tangent_basis;
+        tangent_basis.col(0) = g.unitOrthogonal();
+        tangent_basis.col(1) = g.cross(tangent_basis.col(0));
+        Eigen::Matrix2d cov_tangent;
+        const auto cov_it = options_.gravity_covariances.find(image_id);
+        if (cov_it != options_.gravity_covariances.end()) {
+          cov_tangent =
+              tangent_basis.transpose() * cov_it->second * tangent_basis;
+        } else {
+          cov_tangent =
+              default_sigma * default_sigma * Eigen::Matrix2d::Identity();
+        }
+        cov_tangent += 1e-12 * Eigen::Matrix2d::Identity();
+        const Eigen::Matrix2d information =
+            options_.gravity_prior_weight * cov_tangent.inverse();
+        const Eigen::Matrix2d whitener =
+            Eigen::LLT<Eigen::Matrix2d>(information).matrixU();
+        problem_->AddResidualBlock(
+            GravityPriorCostFunctor::Create(
+                cam_from_rig_rot, whitener * tangent_basis.transpose()),
+            nullptr,
+            rig_from_world.params.data());
+        num_gravity_priors++;
+      }
+      VLOG(2) << "Added " << num_gravity_priors << " gravity priors";
     }
 
     ParameterizeRigsAndFrames(

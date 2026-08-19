@@ -310,6 +310,28 @@ void BindBundleAdjuster(py::module& m) {
               "(prior_focal, sigma) in pixels; adds (f - prior)/sigma "
               "residuals per focal-length parameter.")
           .def_readwrite(
+              "gravity_priors",
+              &BAOpts::gravity_priors,
+              "Optional soft gravity priors: image_id -> unit gravity-down "
+              "direction in the camera frame; adds whitened tangent "
+              "residuals on the frame rotation (assumes a gravity-aligned "
+              "gauge, world z up).")
+          .def_readwrite(
+              "gravity_covariances",
+              &BAOpts::gravity_covariances,
+              "Per-image 3x3 gravity covariance (camera frame) keyed by "
+              "image_id; images without an entry use "
+              "gravity_prior_sigma_deg.")
+          .def_readwrite(
+              "gravity_prior_weight",
+              &BAOpts::gravity_prior_weight,
+              "Global scale on the gravity prior information matrix.")
+          .def_readwrite(
+              "gravity_prior_sigma_deg",
+              &BAOpts::gravity_prior_sigma_deg,
+              "Isotropic tangent-space sigma (degrees) for gravity priors "
+              "without a per-image covariance.")
+          .def_readwrite(
               "refine_principal_point",
               &BAOpts::refine_principal_point,
               "Whether to refine the principal point parameter group.")

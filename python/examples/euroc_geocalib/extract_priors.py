@@ -60,6 +60,11 @@ def main():
     parser.add_argument("--fprior", action="store_true",
                         help="use the known focal from camera.txt as a prior "
                              "(gravity-only LM solve)")
+    parser.add_argument("--shared", action="store_true",
+                        help="additionally estimate ONE sequence-level focal via a "
+                             "shared-intrinsics joint solve over a uniform frame "
+                             "sample (stored as shared_focal / shared_focal_sigma; "
+                             "more robust than fusing independent per-frame solves)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out", default="priors.npz",
                         help="output file name, written inside --seq_dir")
@@ -102,6 +107,24 @@ def main():
         if (i + 1) % 200 == 0:
             print(f"{i + 1}/{len(frames)} frames")
 
+    shared = {}
+    if args.shared:
+        idx = np.linspace(0, len(frames) - 1, min(32, len(frames))).astype(int)
+        batch = torch.stack([
+            torch.tensor(
+                cv2.imread(str(frames[i]), cv2.IMREAD_GRAYSCALE), dtype=torch.float32
+            )[None].expand(3, -1, -1) / 255.0
+            for i in idx
+        ])
+        with torch.no_grad():
+            pred = model.calibrate(batch.to(args.device), shared_intrinsics=True)
+        f_shared = float(pred["camera"].f[0, 1])
+        fu = pred.get("focal_uncertainty")
+        sigma_shared = float(fu.flatten()[0]) if fu is not None else 50.0
+        shared = {"shared_focal": f_shared, "shared_focal_sigma": sigma_shared}
+        print(f"shared-intrinsics focal over {len(idx)} frames: "
+              f"{f_shared:.2f} +- {sigma_shared:.2f} px")
+
     out = args.seq_dir / args.out
     np.savez(
         out,
@@ -111,6 +134,7 @@ def main():
         gravity_uncertainty=np.array(g_unc),
         focal=np.array(focal),
         focal_uncertainty=np.array(focal_unc),
+        **shared,
     )
     print(
         f"wrote {len(names)} priors to {out} "

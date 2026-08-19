@@ -70,9 +70,10 @@ def load_gt(seq_dir: Path):
 
 
 def load_priors(seq_dir: Path, priors_file: str):
-    """Return dict name -> (gravity_down, cov, uncertainty, focal, focal_sigma)."""
+    """Return (dict name -> (gravity_down, cov, uncertainty, focal, focal_sigma),
+    shared_focal or None, shared_focal_sigma or None)."""
     data = np.load(seq_dir / priors_file)
-    return {
+    per_frame = {
         str(n): (g, c, float(u), float(f), float(fs))
         for n, g, c, u, f, fs in zip(
             data["names"],
@@ -83,6 +84,9 @@ def load_priors(seq_dir: Path, priors_file: str):
             data["focal_uncertainty"],
         )
     }
+    shared_f = float(data["shared_focal"]) if "shared_focal" in data else None
+    shared_s = float(data["shared_focal_sigma"]) if "shared_focal_sigma" in data else None
+    return per_frame, shared_f, shared_s
 
 
 def run_sequence(args, seq: str) -> dict:
@@ -98,6 +102,8 @@ def run_sequence(args, seq: str) -> dict:
         tag += f"-gate{args.gate_frac}"
     if args.soft:
         tag += f"-soft{args.lam}"
+    if args.gravity_ba:
+        tag += f"-gba{args.gravity_ba_weight}"
     if args.uncalib:
         tag += "-uncalib"
     if args.focal_init != "none":
@@ -127,21 +133,28 @@ def run_sequence(args, seq: str) -> dict:
     print(f"{seq}: {len(sel)} frames (stride {stride}), "
           f"PINHOLE {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f}")
 
-    priors = None
+    priors = shared_focal = shared_sigma = None
     if args.gravity == "priors" or args.focal_init == "priors":
-        priors = load_priors(seq_dir, args.priors)
+        priors, shared_focal, shared_sigma = load_priors(seq_dir, args.priors)
 
     f_fused = sigma_fused = spread = None
     if args.uncalib and args.focal_init == "priors":
-        # precision-weighted fusion of the per-frame GeoCalib focals (selected frames)
         fs = np.array([priors[n][3] for n in sel if n in priors])
-        sigs = np.maximum(np.array([priors[n][4] for n in sel if n in priors]), 1e-3)
-        w = 1.0 / sigs**2
-        f_fused = float(np.sum(w * fs) / np.sum(w))
-        sigma_fused = float(np.sqrt(1.0 / np.sum(w)))
         spread = float(np.std(fs))
-        print(f"fused GeoCalib focal: {f_fused:.2f} (sigma {sigma_fused:.2f}, "
-              f"spread {spread:.2f}; true {fy:.2f})")
+        if shared_focal is not None:
+            # sequence-level shared-intrinsics solve from extract_priors --shared
+            f_fused, sigma_fused = shared_focal, shared_sigma
+            print(f"shared GeoCalib focal: {f_fused:.2f} (sigma {sigma_fused:.2f}, "
+                  f"per-frame spread {spread:.2f}; true {fy:.2f})")
+        else:
+            # precision-weighted fusion of the per-frame focals (selected frames)
+            sigs = np.maximum(
+                np.array([priors[n][4] for n in sel if n in priors]), 1e-3)
+            w = 1.0 / sigs**2
+            f_fused = float(np.sum(w * fs) / np.sum(w))
+            sigma_fused = float(np.sqrt(1.0 / np.sum(w)))
+            print(f"fused GeoCalib focal: {f_fused:.2f} (sigma {sigma_fused:.2f}, "
+                  f"spread {spread:.2f}; true {fy:.2f})")
 
     # --- feature extraction + matching ---
     db = work / "database.db"
@@ -270,8 +283,17 @@ def run_sequence(args, seq: str) -> dict:
             ra_opts.gravity_covariances = {
                 image.image_id: cov for image, _, _, cov in entries
             }
+        if args.gravity_ba:
+            ba_opts = opts.mapper.bundle_adjustment
+            ba_opts.gravity_priors = {
+                image.image_id: g for image, g, _, _ in entries
+            }
+            ba_opts.gravity_covariances = {
+                image.image_id: cov for image, _, _, cov in entries
+            }
+            ba_opts.gravity_prior_weight = args.gravity_ba_weight
         print(f"wrote {len(entries)} gravity pose priors ({args.gravity}); "
-              f"soft={args.soft} lam={args.lam}")
+              f"soft={args.soft} lam={args.lam} gravity_ba={args.gravity_ba}")
 
     recs = pycolmap.global_mapping(db, img_dir, work / "sparse", opts)
     t3 = time.time()
@@ -351,7 +373,16 @@ def main():
     parser.add_argument("--soft", action="store_true",
                         help="soft covariance-weighted gravity instead of hard 1-DoF")
     parser.add_argument("--lam", type=float, default=1e-4,
-                        help="soft mode: global scale on the prior information")
+                        help="soft mode: global scale on the prior information "
+                             "(rotation averaging)")
+    parser.add_argument("--gravity_ba", action="store_true",
+                        help="also add the gravity priors as soft covariance-weighted "
+                             "residuals in bundle adjustment (requires a gravity-aware "
+                             "rotation averaging arm for the z-up gauge)")
+    parser.add_argument("--gravity_ba_weight", type=float, default=1.0,
+                        help="global scale on the BA gravity prior information "
+                             "(BA residuals are whitened, so 1.0 = the prior's own "
+                             "covariance; no lambda rebalancing needed)")
     parser.add_argument("--uncalib", action="store_true",
                         help="import without known intrinsics")
     parser.add_argument("--refine_pp", action="store_true",
