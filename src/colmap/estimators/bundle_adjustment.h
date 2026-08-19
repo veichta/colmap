@@ -225,6 +225,28 @@ struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   // per-image covariance.
   double gravity_prior_sigma_deg = 1.0;
 
+  // Optional JOINT soft gravity+focal priors: per image, the gravity-down
+  // direction (unit, camera frame), a focal-length prior (pixels), and the
+  // 4x4 covariance over (down-direction (3, rank-2 tangent), focal),
+  // including the gravity<->focal cross terms. Adds 3 whitened residuals
+  // coupling the frame rotation and the camera's focal-length parameters.
+  // More expressive than separate gravity_priors + focal_priors: the
+  // cross-covariance transfers the pitch<->focal ambiguity structure of
+  // learned single-image calibrators (e.g. GeoCalib) into the bundle.
+  // Assumes COLMAP's gravity-aligned gauge (gravity down = +y world).
+  struct JointGravityFocalPrior {
+    // Unit gravity-down direction in the camera frame.
+    Eigen::Vector3d gravity = Eigen::Vector3d(0, 1, 0);
+    // Focal-length prior in pixels.
+    double focal = 0;
+    // Covariance over (down-direction (3), focal), camera frame / pixels.
+    Eigen::Matrix4d covariance = Eigen::Matrix4d::Identity();
+  };
+  std::unordered_map<image_t, JointGravityFocalPrior> gravity_focal_priors;
+
+  // Global scale on the joint prior information matrix.
+  double gravity_focal_prior_weight = 1.0;
+
   // Whether to print a final summary.
   bool print_summary = true;
 

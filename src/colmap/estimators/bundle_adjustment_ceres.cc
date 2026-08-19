@@ -684,6 +684,77 @@ struct GravityPriorCostFunctor {
   const Eigen::Matrix<double, 2, 3> whitened_tangent_;
 };
 
+// Joint soft gravity+focal prior: 3 whitened residuals coupling the frame
+// rotation (2 tangent components of the down-direction misalignment) and the
+// camera's focal length (mean over the focal-length parameters), with the
+// full 3x3 whitener carrying the gravity<->focal cross information (see
+// BundleAdjustmentOptions::gravity_focal_priors). Parameter blocks:
+// rig_from_world (7) + camera params (dynamic).
+struct JointGravityFocalPriorCostFunctor {
+  JointGravityFocalPriorCostFunctor(const Eigen::Matrix3d& cam_from_rig_rot,
+                                    const Eigen::Matrix<double, 2, 3>& tangent,
+                                    const Eigen::Matrix3d& whitener,
+                                    double focal_prior,
+                                    std::vector<int> focal_idxs)
+      : cam_from_rig_rot_(cam_from_rig_rot),
+        tangent_(tangent),
+        whitener_(whitener),
+        focal_prior_(focal_prior),
+        focal_idxs_(std::move(focal_idxs)) {}
+
+  template <typename T>
+  bool operator()(T const* const* params, T* residuals) const {
+    const T* rig_from_world = params[0];
+    const T* camera_params = params[1];
+    const Eigen::Quaternion<T> rig_from_world_rotation(rig_from_world[3],
+                                                       rig_from_world[0],
+                                                       rig_from_world[1],
+                                                       rig_from_world[2]);
+    // COLMAP's gravity-aligned gauge: gravity down along +y of the world.
+    const Eigen::Matrix<T, 3, 1> down_world(T(0), T(1), T(0));
+    const Eigen::Matrix<T, 3, 1> down_cam =
+        cam_from_rig_rot_.cast<T>() * (rig_from_world_rotation * down_world);
+    T focal = T(0);
+    for (const int idx : focal_idxs_) {
+      focal += camera_params[idx];
+    }
+    focal /= T(static_cast<double>(focal_idxs_.size()));
+    Eigen::Matrix<T, 3, 1> v;
+    v.template head<2>() = tangent_.cast<T>() * down_cam;
+    v(2) = focal - T(focal_prior_);
+    const Eigen::Matrix<T, 3, 1> res = whitener_.cast<T>() * v;
+    residuals[0] = res(0);
+    residuals[1] = res(1);
+    residuals[2] = res(2);
+    return true;
+  }
+
+  static ceres::CostFunction* Create(const Eigen::Matrix3d& cam_from_rig_rot,
+                                     const Eigen::Matrix<double, 2, 3>& tangent,
+                                     const Eigen::Matrix3d& whitener,
+                                     double focal_prior,
+                                     std::vector<int> focal_idxs,
+                                     int num_camera_params) {
+    auto* cost = new ceres::DynamicAutoDiffCostFunction<
+        JointGravityFocalPriorCostFunctor>(
+        new JointGravityFocalPriorCostFunctor(cam_from_rig_rot,
+                                              tangent,
+                                              whitener,
+                                              focal_prior,
+                                              std::move(focal_idxs)));
+    cost->AddParameterBlock(7);
+    cost->AddParameterBlock(num_camera_params);
+    cost->SetNumResiduals(3);
+    return cost;
+  }
+
+  const Eigen::Matrix3d cam_from_rig_rot_;
+  const Eigen::Matrix<double, 2, 3> tangent_;
+  const Eigen::Matrix3d whitener_;
+  const double focal_prior_;
+  const std::vector<int> focal_idxs_;
+};
+
 class DefaultBundleAdjuster : public CeresBundleAdjuster {
  public:
   DefaultBundleAdjuster(const BundleAdjustmentOptions& options,
@@ -786,6 +857,60 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
         num_gravity_priors++;
       }
       VLOG(2) << "Added " << num_gravity_priors << " gravity priors";
+    }
+
+    // Add joint gravity+focal priors (frame rotation x camera focal).
+    if (!options_.gravity_focal_priors.empty()) {
+      int num_joint_priors = 0;
+      for (const auto& [image_id, prior] : options_.gravity_focal_priors) {
+        if (parameterized_image_ids_.count(image_id) == 0) {
+          continue;
+        }
+        Image& image = reconstruction.Image(image_id);
+        Rigid3d& rig_from_world = image.FramePtr()->RigFromWorld();
+        Camera& camera = *image.CameraPtr();
+        if (!problem_->HasParameterBlock(rig_from_world.params.data()) ||
+            !problem_->HasParameterBlock(camera.params.data())) {
+          continue;
+        }
+        const sensor_t sensor_id = camera.SensorId();
+        Eigen::Matrix3d cam_from_rig_rot = Eigen::Matrix3d::Identity();
+        if (!image.FramePtr()->RigPtr()->IsRefSensor(sensor_id)) {
+          cam_from_rig_rot = image.FramePtr()
+                                 ->RigPtr()
+                                 ->SensorFromRig(sensor_id)
+                                 .rotation()
+                                 .toRotationMatrix();
+        }
+        const Eigen::Vector3d g = prior.gravity.normalized();
+        Eigen::Matrix<double, 3, 2> tangent_basis;
+        tangent_basis.col(0) = g.unitOrthogonal();
+        tangent_basis.col(1) = g.cross(tangent_basis.col(0));
+        // Project the 4x4 (direction, focal) covariance to (tangent, focal).
+        Eigen::Matrix<double, 3, 4> proj = Eigen::Matrix<double, 3, 4>::Zero();
+        proj.block<2, 3>(0, 0) = tangent_basis.transpose();
+        proj(2, 3) = 1.0;
+        Eigen::Matrix3d cov = proj * prior.covariance * proj.transpose();
+        cov += 1e-12 * Eigen::Matrix3d::Identity();
+        const Eigen::Matrix3d information =
+            options_.gravity_focal_prior_weight * cov.inverse();
+        const Eigen::Matrix3d whitener =
+            Eigen::LLT<Eigen::Matrix3d>(information).matrixU();
+        const span<const size_t> idxs = camera.FocalLengthIdxs();
+        problem_->AddResidualBlock(
+            JointGravityFocalPriorCostFunctor::Create(
+                cam_from_rig_rot,
+                tangent_basis.transpose(),
+                whitener,
+                prior.focal,
+                std::vector<int>(idxs.begin(), idxs.end()),
+                static_cast<int>(camera.params.size())),
+            nullptr,
+            rig_from_world.params.data(),
+            camera.params.data());
+        num_joint_priors++;
+      }
+      VLOG(2) << "Added " << num_joint_priors << " joint gravity+focal priors";
     }
 
     ParameterizeRigsAndFrames(

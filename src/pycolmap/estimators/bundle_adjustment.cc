@@ -297,6 +297,18 @@ void BindBundleAdjuster(py::module& m) {
 
   // Solver-agnostic bundle adjustment options
   using BAOpts = BundleAdjustmentOptions;
+  py::classh<BAOpts::JointGravityFocalPrior>(m, "JointGravityFocalPrior")
+      .def(py::init<>())
+      .def_readwrite("gravity",
+                     &BAOpts::JointGravityFocalPrior::gravity,
+                     "Unit gravity-down direction in the camera frame.")
+      .def_readwrite("focal",
+                     &BAOpts::JointGravityFocalPrior::focal,
+                     "Focal-length prior in pixels.")
+      .def_readwrite("covariance",
+                     &BAOpts::JointGravityFocalPrior::covariance,
+                     "4x4 covariance over (down-direction (3), focal), "
+                     "including the gravity<->focal cross terms.");
   auto PyBundleAdjustmentOptions =
       py::classh<BAOpts>(m, "BundleAdjustmentOptions")
           .def(py::init<>())
@@ -331,6 +343,18 @@ void BindBundleAdjuster(py::module& m) {
               &BAOpts::gravity_prior_sigma_deg,
               "Isotropic tangent-space sigma (degrees) for gravity priors "
               "without a per-image covariance.")
+          .def_readwrite(
+              "gravity_focal_priors",
+              &BAOpts::gravity_focal_priors,
+              "Optional JOINT soft gravity+focal priors keyed by image_id: "
+              "3 whitened residuals coupling the frame rotation and the "
+              "camera focal length, carrying the gravity<->focal "
+              "cross-covariance (assumes COLMAP's gravity-aligned gauge, "
+              "gravity down = +y world).")
+          .def_readwrite(
+              "gravity_focal_prior_weight",
+              &BAOpts::gravity_focal_prior_weight,
+              "Global scale on the joint prior information matrix.")
           .def_readwrite(
               "refine_principal_point",
               &BAOpts::refine_principal_point,
