@@ -308,18 +308,24 @@ def run_sequence(args, seq: str) -> dict:
         np.degrees(Rotation.from_matrix(e @ S.as_matrix() @ g.T).magnitude())
         for e, g in zip(R_est, R_gt)
     ])
+    # Score over ALL selected frames: unregistered frames count as failures
+    # (error = inf), so arms with different registration rates share the same
+    # denominator and deregistering hard frames cannot inflate the metrics.
     thresholds = [0.5, 1, 2]
-    auc = compute_auc(errs, thresholds)
-    print(f"rotation error (deg): mean {errs.mean():.3f}  "
-          f"median {np.median(errs):.3f}  max {errs.max():.3f}")
+    errs_all = np.concatenate([errs, np.full(len(sel) - len(errs), np.inf)])
+    auc = compute_auc(errs_all, thresholds)
+    print(f"rotation error (deg, over all {len(sel)} frames, unregistered = inf): "
+          f"median {np.median(errs_all):.3f}  "
+          f"median-registered {np.median(errs):.3f}  max {errs.max():.3f}")
     print(f"AUC@0.5/1/2: {100 * auc[0]:.1f} / {100 * auc[1]:.1f} / {100 * auc[2]:.1f}")
     print(f"registration: {len(errs)}/{len(sel)} = {100 * len(errs) / len(sel):.1f}%")
     return {
         "seq": seq,
         "tag": tag,
-        "mean": float(errs.mean()),
-        "median": float(np.median(errs)),
-        "max": float(errs.max()),
+        "median": float(np.median(errs_all)),
+        "median_registered": float(np.median(errs)),
+        "mean_registered": float(errs.mean()),
+        "max_registered": float(errs.max()),
         **{f"auc@{t}": a for t, a in zip(thresholds, auc)},
         "registered": len(errs),
         "total": len(sel),
