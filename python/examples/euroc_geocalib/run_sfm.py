@@ -73,6 +73,7 @@ def load_gt(seq_dir: Path):
 
 def load_priors(seq_dir: Path, priors_file: str):
     """Return (dict name -> (gravity_down, cov, uncertainty, focal, focal_sigma),
+    dict name -> 4x4 joint (direction, focal) covariance or None,
     shared_focal or None, shared_focal_sigma or None)."""
     data = np.load(seq_dir / priors_file)
     per_frame = {
@@ -86,9 +87,12 @@ def load_priors(seq_dir: Path, priors_file: str):
             data["focal_uncertainty"],
         )
     }
+    gf = None
+    if "gf_cov" in data:
+        gf = {str(n): c for n, c in zip(data["names"], data["gf_cov"])}
     shared_f = float(data["shared_focal"]) if "shared_focal" in data else None
     shared_s = float(data["shared_focal_sigma"]) if "shared_focal_sigma" in data else None
-    return per_frame, shared_f, shared_s
+    return per_frame, gf, shared_f, shared_s
 
 
 def run_sequence(args, seq: str) -> dict:
@@ -101,7 +105,9 @@ def run_sequence(args, seq: str) -> dict:
     tag += f"-grav_{args.gravity}"
     if args.gravity != "none":
         tag += "-hard" if args.hard else f"-soft{args.lam}"
-        if args.gravity_ba:
+        if args.joint_ba and args.gravity == "priors" and not args.calibrated:
+            tag += f"-joint{args.gravity_ba_weight}"
+        elif args.gravity_ba:
             tag += f"-gba{args.gravity_ba_weight}"
     if args.noise_deg > 0:
         tag += f"-noise{args.noise_deg}"
@@ -131,9 +137,11 @@ def run_sequence(args, seq: str) -> dict:
     print(f"{seq}: {len(sel)} frames (stride {stride}), "
           f"PINHOLE {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f}")
 
-    priors = shared_focal = shared_sigma = None
+    priors = gf_cov = shared_focal = shared_sigma = None
     if args.gravity == "priors" or args.focal_init == "priors":
-        priors, shared_focal, shared_sigma = load_priors(seq_dir, args.priors)
+        priors, gf_cov, shared_focal, shared_sigma = load_priors(seq_dir, args.priors)
+    use_joint = (args.joint_ba and args.gravity == "priors"
+                 and gf_cov is not None and not args.calibrated)
 
     f_fused = sigma_fused = spread = None
     if args.uncalib and args.focal_init == "priors":
@@ -221,7 +229,8 @@ def run_sequence(args, seq: str) -> dict:
         opts.mapper.skip_retriangulation = True
     if args.refine_pp:
         opts.mapper.bundle_adjustment.refine_principal_point = True
-    if args.focal_ba:
+    if args.focal_ba and not use_joint:
+        # scalar BA focal prior; superseded by the joint prior when available
         sigma_ba = max(spread, 5.0)
         with pycolmap.Database.open(db) as database:
             cam_ids = [c.camera_id for c in database.read_all_cameras()]
@@ -281,8 +290,18 @@ def run_sequence(args, seq: str) -> dict:
             ra_opts.gravity_covariances = {
                 image.image_id: cov for image, _, _, cov in entries
             }
-        if args.gravity_ba:
-            ba_opts = opts.mapper.bundle_adjustment
+        ba_opts = opts.mapper.bundle_adjustment
+        if use_joint:
+            joint = {}
+            for image, g, _, _ in entries:
+                p = pycolmap.JointGravityFocalPrior()
+                p.gravity = g
+                p.focal = shared_focal
+                p.covariance = gf_cov[image.name]
+                joint[image.image_id] = p
+            ba_opts.gravity_focal_priors = joint
+            ba_opts.gravity_focal_prior_weight = args.gravity_ba_weight
+        elif args.gravity_ba:
             ba_opts.gravity_priors = {
                 image.image_id: g for image, g, _, _ in entries
             }
@@ -291,7 +310,8 @@ def run_sequence(args, seq: str) -> dict:
             }
             ba_opts.gravity_prior_weight = args.gravity_ba_weight
         print(f"wrote {len(entries)} gravity pose priors ({args.gravity}); "
-              f"soft={args.soft} lam={args.lam} gravity_ba={args.gravity_ba}")
+              f"soft={args.soft} lam={args.lam} joint_ba={use_joint} "
+              f"gravity_ba={args.gravity_ba and not use_joint}")
 
     recs = pycolmap.global_mapping(db, img_dir, work / "sparse", opts)
     t3 = time.time()
@@ -383,10 +403,15 @@ def main():
     parser.add_argument("--lam", type=float, default=1e-4,
                         help="soft mode: global scale on the prior information "
                              "(rotation averaging)")
+    parser.add_argument("--joint_ba", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="use the JOINT gravity+focal prior in bundle adjustment "
+                             "(couples frame rotation and camera focal with the full "
+                             "cross-covariance); requires gf_cov in the priors file")
     parser.add_argument("--gravity_ba", action=argparse.BooleanOptionalAction,
                         default=True,
-                        help="add the gravity priors as soft covariance-weighted "
-                             "residuals in bundle adjustment")
+                        help="ablation fallback: separate gravity-only priors in BA "
+                             "(used when the joint prior is disabled or unavailable)")
     parser.add_argument("--gravity_ba_weight", type=float, default=1.0,
                         help="global scale on the BA gravity prior information "
                              "(BA residuals are whitened, so 1.0 = the prior's own "
@@ -426,7 +451,9 @@ def main():
     if args.focal_init != "priors":
         args.focal_vgc = args.focal_ba = False
     if args.gravity == "none":
-        args.gravity_ba = False
+        args.gravity_ba = args.joint_ba = False
+    if args.calibrated:
+        args.joint_ba = False
 
     if args.gravity == "priors" or args.focal_init == "priors":
         missing = []
