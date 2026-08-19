@@ -2,7 +2,9 @@
 
 For each sequence the script reads the raw ASL folder (``mav0/``), undistorts the cam0
 images to a centered-principal-point PINHOLE camera (single remap; the raw camera is
-pinhole + radial-tangential), and writes
+pinhole + radial-tangential), crops to the largest centered fully-valid rectangle (no
+black borders -- GeoCalib is sensitive to synthetic border content; the focal is
+unchanged and the pp stays exactly centered by construction), and writes
 
     <out_dir>/<seq>/images/<timestamp>.png   undistorted frames
     <out_dir>/<seq>/camera.txt               "PINHOLE fx fy cx cy" (COLMAP convention)
@@ -129,16 +131,35 @@ def main():
         K, dist, (W, H), T_BS = load_cam0(seq_dir)
         # Undistort to a pinhole camera with the pp exactly centered. OpenCV uses
         # integer pixel-center coordinates, so the center is ((W-1)/2, (H-1)/2);
-        # camera.txt is written in COLMAP's continuous convention (W/2, H/2).
+        # camera.txt is written in COLMAP's continuous convention (w/2, h/2).
         K_new = np.array([[K[0, 0], 0, (W - 1) / 2], [0, K[1, 1], (H - 1) / 2], [0, 0, 1]])
         map_x, map_y = cv2.initUndistortRectifyMap(
             K, dist, None, K_new, (W, H), cv2.CV_32FC1
         )
 
+        # Largest centered rectangle whose pixels all sample inside the raw sensor
+        # (no black borders). Margins are symmetric, so the pp stays exactly centered.
+        valid = (map_x >= 0) & (map_x <= W - 1) & (map_y >= 0) & (map_y <= H - 1)
+        mx, my = 0, 0
+        while not valid[my : H - my, mx : W - mx].all():
+            rows_bad = ~valid[my : H - my, mx : W - mx].all(axis=1)
+            cols_bad = ~valid[my : H - my, mx : W - mx].all(axis=0)
+            # grow the margin on the axis whose border rows/cols are invalid
+            if rows_bad[0] or rows_bad[-1]:
+                my += 1
+            if cols_bad[0] or cols_bad[-1]:
+                mx += 1
+            if not (rows_bad[0] or rows_bad[-1] or cols_bad[0] or cols_bad[-1]):
+                my += 1  # interior invalid pixels (should not happen): shrink anyway
+                mx += 1
+        w, h = W - 2 * mx, H - 2 * my
+        map_x, map_y = map_x[my : H - my, mx : W - mx], map_y[my : H - my, mx : W - mx]
+        print(f"{seq}: valid centered crop {w}x{h} (margins x={mx}, y={my})")
+
         out = args.out_dir / seq
         (out / "images").mkdir(parents=True, exist_ok=True)
         (out / "camera.txt").write_text(
-            f"PINHOLE {K_new[0, 0]} {K_new[1, 1]} {W / 2} {H / 2}\n"
+            f"PINHOLE {K_new[0, 0]} {K_new[1, 1]} {w / 2} {h / 2}\n"
         )
 
         ts_gt, R_WS, p_WS = load_gt(seq_dir)

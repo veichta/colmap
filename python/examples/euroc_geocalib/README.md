@@ -112,4 +112,16 @@ models):
 - The EuRoC world frame (official `state_groundtruth_estimate0`) is gravity-aligned
   with +z **up**, so GT gravity in the camera is `R_cam_from_world @ [0, 0, -1]`.
 - GeoCalib assumes a centered principal point; `prepare_euroc.py` undistorts to a
-  centered-pp pinhole camera so this holds exactly.
+  centered-pp pinhole camera (original focal, pp centered by choosing the undistortion
+  target `K_new`) so this holds exactly.
+- **Undistortion = a small crop in angle space.** The barrel lens squeezes a wider view
+  onto the sensor than a same-size rectilinear frame can hold; undistorting at the
+  original focal keeps only the central part (EuRoC cam0: ~53 deg diagonal half-FOV
+  captured, ~44 deg kept). In exchange, every output pixel is real image content — the
+  barrel surplus covers the whole canvas including the ~9 px principal-point shift, so
+  there are **no black borders** (verified: 0 invalid pixels). On a rectangular canvas
+  you can have all captured content (with black regions) or only real content (with an
+  angular crop), never both; learned predictors are sensitive to synthetic border
+  content, so the crop is the right side of that trade-off. For camera models where the
+  geometry goes the other way (pincushion, large pp offsets), the script additionally
+  crops to the largest centered fully-valid rectangle — a no-op on EuRoC.
