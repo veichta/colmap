@@ -115,6 +115,24 @@ Observations from the full experiment series (including stronger research models
 - Gains concentrate where SfM is weak; on easy sequences priors are neutral, never
   harmful (in soft mode).
 
+## TartanAir (synthetic benchmark)
+
+`prepare_tartanair.py` prepares TartanAir trajectories into the same layout — a fully
+synthetic complement to EuRoC: perfect pinhole camera with *exactly* centered pp
+(fx = fy = 320, cx = 320, cy = 240 at 640x480), zero distortion (no undistortion or
+resampling at all), exact poses, gravity-aligned NED world. Download per-environment
+`image_left.zip` files (~2–11 GB each, poses included) from the AirLab server (see
+https://github.com/castacks/tartanair_tools), then:
+
+```bash
+python prepare_tartanair.py --raw_dir data/tartanair_raw --out_dir data/tartanair \
+    --envs japanesealley carwelding
+# then extract_priors.py / run_sfm.py exactly as for EuRoC
+```
+
+GT gravity convention (NED body -> CV camera, world flipped to z-up) is verified
+against GeoCalib predictions: 0.9 deg median angular difference.
+
 ## Convention notes
 
 - COLMAP `PosePrior.gravity` is the gravity **down** direction in the sensor frame;
