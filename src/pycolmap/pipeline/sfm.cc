@@ -176,6 +176,13 @@ void BindSfM(py::module& m) {
         py::classh<Opts>(m, "ViewGraphCalibrationOptions")
             .def(py::init<>())
             .def_readwrite("random_seed", &Opts::random_seed)
+            .def_readwrite(
+                "focal_priors",
+                &Opts::focal_priors,
+                "Optional soft focal-length priors: camera_id -> "
+                "(prior_focal, sigma) in pixels; prior'd cameras are refined "
+                "with an added (f - prior)/sigma residual instead of being "
+                "held constant.")
             .def_readwrite("cross_validate_prior_focal_lengths",
                            &Opts::cross_validate_prior_focal_lengths)
             .def_readwrite("min_calibrated_pair_ratio",

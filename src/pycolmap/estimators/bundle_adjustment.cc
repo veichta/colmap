@@ -304,6 +304,12 @@ void BindBundleAdjuster(py::module& m) {
                          &BAOpts::refine_focal_length,
                          "Whether to refine the focal length parameter group.")
           .def_readwrite(
+              "focal_priors",
+              &BAOpts::focal_priors,
+              "Optional soft focal-length priors: camera_id -> "
+              "(prior_focal, sigma) in pixels; adds (f - prior)/sigma "
+              "residuals per focal-length parameter.")
+          .def_readwrite(
               "refine_principal_point",
               &BAOpts::refine_principal_point,
               "Whether to refine the principal point parameter group.")

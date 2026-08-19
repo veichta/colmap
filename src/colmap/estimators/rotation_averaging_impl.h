@@ -39,6 +39,20 @@ class RotationAveragingProblem {
     std::variant<GravityAligned1DOF, Full3DOF> constraint;
   };
 
+  // Soft gravity prior constraint (soft_gravity mode): 2 whitened residual
+  // rows pulling the frame's roll/pitch toward the prior gravity direction.
+  struct GravityPriorConstraint {
+    frame_t frame_id = kInvalidFrameId;
+    int frame_param_idx = -1;
+    // Starting row in matrix A (2 rows).
+    int row_index = -1;
+    // Gravity-aligned rotation G(g) of the prior (columns 0,2 span the
+    // tangent plane of the gravity direction).
+    Eigen::Matrix3d gravity_aligned_R;
+    // Upper-triangular whitener U with U^T U = information (lambda * Sigma_t^-1).
+    Eigen::Matrix2d whitener;
+  };
+
   RotationAveragingProblem(const PoseGraph& pose_graph,
                            const std::vector<PosePrior>& pose_priors,
                            const RotationEstimatorOptions& options,
@@ -77,6 +91,9 @@ class RotationAveragingProblem {
   int NumGaugeFixingResiduals() const { return num_gauge_fixing_residuals_; }
   const NodeHashMap<image_pair_t, PairConstraint>& PairConstraints() const {
     return pair_constraints_;
+  }
+  const std::vector<GravityPriorConstraint>& GravityPriorConstraints() const {
+    return gravity_prior_constraints_;
   }
 
  private:
@@ -119,6 +136,9 @@ class RotationAveragingProblem {
 
   // Preprocessed constraints for each image pair.
   NodeHashMap<image_pair_t, PairConstraint> pair_constraints_;
+
+  // Soft gravity prior constraints (one per gravity frame, soft_gravity mode).
+  std::vector<GravityPriorConstraint> gravity_prior_constraints_;
 
   // Gauge fixing (removes rotational ambiguity).
   frame_t fixed_frame_id_ = kInvalidFrameId;

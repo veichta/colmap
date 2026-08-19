@@ -36,6 +36,7 @@
 #include "colmap/util/hash_containers.h"
 
 #include <memory>
+#include <unordered_map>
 
 #include <Eigen/Core>
 
@@ -198,6 +199,12 @@ struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   // Only takes effect when refine_rig_from_world is true.
   // When true, only translation is refined.
   bool constant_rig_from_world_rotation = false;
+
+  // Optional soft focal-length priors: camera_id -> (prior_focal, sigma), in
+  // pixels. Adds a residual (f - prior_focal) / sigma per focal-length
+  // parameter of the camera. Intended for learned per-camera calibration
+  // priors (e.g. GeoCalib) with their uncertainties.
+  std::unordered_map<camera_t, Eigen::Vector2d> focal_priors;
 
   // Whether to print a final summary.
   bool print_summary = true;

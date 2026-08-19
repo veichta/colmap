@@ -601,6 +601,45 @@ ceres::Solver::Summary SolveWithGpuFallback(
   return ceres_summary;
 }
 
+// Soft focal-length prior: residual (f - prior) / sigma for each focal-length
+// parameter of the camera block (see BundleAdjustmentOptions::focal_priors).
+class FocalPriorCostFunction : public ceres::CostFunction {
+ public:
+  FocalPriorCostFunction(std::vector<int> focal_idxs,
+                         double prior,
+                         double sigma,
+                         int num_camera_params)
+      : focal_idxs_(std::move(focal_idxs)),
+        prior_(prior),
+        inv_sigma_(1.0 / sigma) {
+    set_num_residuals(static_cast<int>(focal_idxs_.size()));
+    mutable_parameter_block_sizes()->push_back(num_camera_params);
+  }
+
+  bool Evaluate(double const* const* parameters,
+                double* residuals,
+                double** jacobians) const override {
+    const double* params = parameters[0];
+    const int num_res = static_cast<int>(focal_idxs_.size());
+    for (int i = 0; i < num_res; ++i) {
+      residuals[i] = (params[focal_idxs_[i]] - prior_) * inv_sigma_;
+    }
+    if (jacobians != nullptr && jacobians[0] != nullptr) {
+      const int num_params = parameter_block_sizes()[0];
+      std::fill(jacobians[0], jacobians[0] + num_res * num_params, 0.0);
+      for (int i = 0; i < num_res; ++i) {
+        jacobians[0][i * num_params + focal_idxs_[i]] = inv_sigma_;
+      }
+    }
+    return true;
+  }
+
+ private:
+  const std::vector<int> focal_idxs_;
+  const double prior_;
+  const double inv_sigma_;
+};
+
 class DefaultBundleAdjuster : public CeresBundleAdjuster {
  public:
   DefaultBundleAdjuster(const BundleAdjustmentOptions& options,
@@ -635,6 +674,26 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
                         parameterized_camera_ids_,
                         reconstruction,
                         *problem_);
+
+    // Add soft focal-length priors for parameterized cameras.
+    for (const auto& [camera_id, prior] : options_.focal_priors) {
+      if (parameterized_camera_ids_.count(camera_id) == 0) {
+        continue;
+      }
+      Camera& camera = reconstruction.Camera(camera_id);
+      const span<const size_t> idxs = camera.FocalLengthIdxs();
+      std::vector<int> focal_idxs(idxs.begin(), idxs.end());
+      problem_->AddResidualBlock(
+          new FocalPriorCostFunction(std::move(focal_idxs),
+                                     prior[0],
+                                     prior[1],
+                                     static_cast<int>(camera.params.size())),
+          nullptr,
+          camera.params.data());
+      VLOG(2) << "Added focal prior " << prior[0] << " (sigma " << prior[1]
+              << ") for camera " << camera_id;
+    }
+
     ParameterizeRigsAndFrames(
         options_, config_, parameterized_image_ids_, reconstruction, *problem_);
     ParameterizePoints(options_,

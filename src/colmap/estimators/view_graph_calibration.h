@@ -32,7 +32,9 @@
 #include "colmap/scene/database.h"
 
 #include <memory>
+#include <unordered_map>
 
+#include <Eigen/Core>
 #include <ceres/ceres.h>
 
 namespace colmap {
@@ -40,6 +42,13 @@ namespace colmap {
 struct ViewGraphCalibrationOptions {
   // Random seed for RANSAC-based estimation (-1 for random).
   int random_seed = -1;
+
+  // Optional soft focal-length priors: camera_id -> (prior_focal, sigma) in
+  // pixels. Cameras with a soft prior are REFINED in the calibration problem
+  // with an additional residual (f - prior_focal) / sigma, fusing the
+  // two-view (Fetzer) constraints with a learned prior (e.g. GeoCalib)
+  // instead of holding prior-focal cameras constant.
+  std::unordered_map<camera_t, Eigen::Vector2d> focal_priors;
 
   // Whether to cross-validate prior focal lengths by checking the ratio of
   // calibrated vs uncalibrated pairs per camera. When enabled, UNCALIBRATED

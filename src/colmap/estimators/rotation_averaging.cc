@@ -355,8 +355,10 @@ bool RotationEstimator::EstimateRotations(
     return false;
   }
 
-  // Handle stratified solving for mixed gravity systems.
-  if (UseGravity(options_, pose_priors) && options_.use_stratified) {
+  // Handle stratified solving for mixed gravity systems (hard mode only; the
+  // soft mode has no 1-DOF subsystem).
+  if (UseGravity(options_, pose_priors) && options_.use_stratified &&
+      !options_.soft_gravity) {
     if (!MaybeSolveGravityAlignedSubset(
             pose_graph, pose_priors, active_image_ids, reconstruction)) {
       return false;

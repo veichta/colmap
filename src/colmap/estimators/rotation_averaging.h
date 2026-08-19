@@ -6,6 +6,7 @@
 #include "colmap/util/enum_utils.h"
 #include "colmap/util/hash_containers.h"
 
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Core>
@@ -71,9 +72,31 @@ struct RotationEstimatorOptions {
   // Flag to use gravity priors for rotation averaging.
   bool use_gravity = false;
 
+  // Soft gravity mode: instead of the hard 1-DOF (yaw-only) reduction, keep
+  // all frames 3-DOF and add per-frame whitened gravity-alignment residuals
+  // weighted by the prior's covariance (tangent space). Intended for noisy
+  // learned gravity priors where the hard reduction injects the prior error.
+  bool soft_gravity = false;
+
+  // Global scale multiplied onto the gravity prior information matrix
+  // (1/covariance) in soft gravity mode. Acts as a temperature to trade off
+  // prior vs relative-rotation constraints.
+  double gravity_prior_weight = 1.0;
+
+  // Isotropic tangent-space sigma (in degrees) used for gravity priors
+  // without a per-image covariance in soft gravity mode.
+  double gravity_prior_sigma_deg = 1.0;
+
+  // Optional per-image 3x3 covariance of the gravity direction in the sensor
+  // frame (rank-2, tangent to the gravity vector), keyed by image_id of the
+  // prior's corr_data_id. Used in soft gravity mode; images without an entry
+  // fall back to gravity_prior_sigma_deg.
+  std::unordered_map<image_t, Eigen::Matrix3d> gravity_covariances;
+
   // Flag to use stratified solving for mixed gravity systems.
   // If true and use_gravity is true, first solves the 1-DOF system with
-  // gravity-only pairs, then solves the full 3-DOF system.
+  // gravity-only pairs, then solves the full 3-DOF system. Ignored in soft
+  // gravity mode (no 1-DOF subsystem exists).
   bool use_stratified = true;
 
   // If true, only consider frames with existing poses when computing

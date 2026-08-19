@@ -172,6 +172,27 @@ void BindRotationEstimator(py::module& m) {
           .def_readwrite("use_gravity",
                          &RotationEstimatorOptions::use_gravity,
                          "Use gravity priors for rotation averaging.")
+          .def_readwrite(
+              "soft_gravity",
+              &RotationEstimatorOptions::soft_gravity,
+              "Soft gravity mode: keep all frames 3-DOF and add per-frame "
+              "whitened gravity-alignment residuals weighted by the prior "
+              "covariance instead of the hard 1-DOF reduction.")
+          .def_readwrite(
+              "gravity_prior_weight",
+              &RotationEstimatorOptions::gravity_prior_weight,
+              "Global scale on the gravity prior information matrix in soft "
+              "gravity mode.")
+          .def_readwrite(
+              "gravity_prior_sigma_deg",
+              &RotationEstimatorOptions::gravity_prior_sigma_deg,
+              "Isotropic tangent-space sigma (degrees) for gravity priors "
+              "without a per-image covariance in soft gravity mode.")
+          .def_readwrite(
+              "gravity_covariances",
+              &RotationEstimatorOptions::gravity_covariances,
+              "Per-image 3x3 gravity covariance (sensor frame) keyed by "
+              "image_id, used in soft gravity mode.")
           .def_readwrite("use_stratified",
                          &RotationEstimatorOptions::use_stratified,
                          "Use stratified solving for mixed gravity systems.")

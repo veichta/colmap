@@ -199,6 +199,28 @@ void ReestimateRelativePoses(
   thread_pool.Wait();
 }
 
+// Soft focal-length prior residual: (f - prior) / sigma. Used to fuse learned
+// per-camera focal priors (e.g. GeoCalib) with the Fetzer two-view constraints
+// (see ViewGraphCalibrationOptions::focal_priors).
+struct SoftFocalPriorCostFunctor {
+  SoftFocalPriorCostFunctor(double prior, double sigma)
+      : prior_(prior), inv_sigma_(1.0 / sigma) {}
+
+  template <typename T>
+  bool operator()(const T* const focal, T* residual) const {
+    residual[0] = (focal[0] - T(prior_)) * T(inv_sigma_);
+    return true;
+  }
+
+  static ceres::CostFunction* Create(double prior, double sigma) {
+    return new ceres::AutoDiffCostFunction<SoftFocalPriorCostFunctor, 1, 1>(
+        new SoftFocalPriorCostFunctor(prior, sigma));
+  }
+
+  const double prior_;
+  const double inv_sigma_;
+};
+
 // Core Ceres optimization for focal length calibration.
 // This is a pure function with no I/O dependencies.
 // See: "Stable Intrinsic Auto-Calibration from Fundamental Matrices of Devices
@@ -273,7 +295,15 @@ FocalLengthCalibResult CalibrateFocalLengths(
     if (!problem.HasParameterBlock(focal_ptr)) continue;
 
     problem.SetParameterLowerBound(focal_ptr, 0, kFocalLengthLowerBound);
-    if (camera.has_prior_focal_length) {
+    const auto prior_it = options.focal_priors.find(camera_id);
+    if (prior_it != options.focal_priors.end()) {
+      // Soft prior: refine the focal, anchored by (prior, sigma).
+      problem.AddResidualBlock(SoftFocalPriorCostFunctor::Create(
+                                   prior_it->second[0], prior_it->second[1]),
+                               nullptr,
+                               focal_ptr);
+      num_cameras++;
+    } else if (camera.has_prior_focal_length) {
       problem.SetParameterBlockConstant(focal_ptr);
     } else {
       num_cameras++;

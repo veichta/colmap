@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <limits>
 
+#include <Eigen/Cholesky>
+
 namespace colmap {
 namespace {
 
@@ -101,6 +103,11 @@ RotationAveragingProblem::RotationAveragingProblem(
 }
 
 bool RotationAveragingProblem::HasFrameGravity(frame_t frame_id) const {
+  // In soft gravity mode all frames stay 3-DOF; the prior enters as weighted
+  // residual rows instead of a hard 1-DOF reduction.
+  if (options_.soft_gravity) {
+    return false;
+  }
   const auto it = frame_to_pose_prior_.find(frame_id);
   return options_.use_gravity && it != frame_to_pose_prior_.end() &&
          it->second->HasGravity();
@@ -278,8 +285,10 @@ void RotationAveragingProblem::BuildPairConstraints(
     const Eigen::Vector3d* frame_gravity2 =
         GetFrameGravityOrNull(frame_to_pose_prior_, frame2.FrameId());
 
-    // Apply gravity alignment transformations if available.
-    if (options_.use_gravity) {
+    // Apply gravity alignment transformations if available (hard mode only;
+    // in soft mode all edges stay full 3-DOF).
+    const bool hard_gravity = options_.use_gravity && !options_.soft_gravity;
+    if (hard_gravity) {
       if (frame_gravity1 != nullptr) {
         R_cam2_from_cam1 =
             R_cam2_from_cam1 * GravityAlignedRotation(*frame_gravity1);
@@ -294,7 +303,7 @@ void RotationAveragingProblem::BuildPairConstraints(
     PairConstraint& constraint = pair_constraints_[pair_id];
     constraint.image_id1 = image_id1;
     constraint.image_id2 = image_id2;
-    if (options_.use_gravity && frame_gravity1 != nullptr &&
+    if (hard_gravity && frame_gravity1 != nullptr &&
         frame_gravity2 != nullptr) {
       // Both frames have gravity: use 1-DOF constraint.
       gravity_aligned_count++;
@@ -320,6 +329,10 @@ void RotationAveragingProblem::BuildConstraintMatrix(
 
   // Count coefficients for accurate reservation.
   size_t num_coeffs = num_gauge_fixing_residuals_;
+  const bool soft_gravity = options_.use_gravity && options_.soft_gravity;
+  if (soft_gravity) {
+    num_coeffs += 4 * frame_to_pose_prior_.size();  // 2x2 block per prior.
+  }
   for (const auto& [pair_id, constraint] : pair_constraints_) {
     if (std::holds_alternative<GravityAligned1DOF>(constraint.constraint)) {
       num_coeffs += 2;
@@ -388,7 +401,8 @@ void RotationAveragingProblem::BuildConstraintMatrix(
       const Eigen::Vector3d* frame_gravity2 =
           GetFrameGravityOrNull(frame_to_pose_prior_, frame2.FrameId());
 
-      if (!options_.use_gravity || frame_gravity1 == nullptr) {
+      const bool hard_gravity = options_.use_gravity && !options_.soft_gravity;
+      if (!hard_gravity || frame_gravity1 == nullptr) {
         for (int i = 0; i < 3; i++) {
           coeffs.emplace_back(curr_row + i, frame_param_idx1 + i, -1);
         }
@@ -397,7 +411,7 @@ void RotationAveragingProblem::BuildConstraintMatrix(
         coeffs.emplace_back(curr_row + 1, frame_param_idx1, -1);
       }
 
-      if (!options_.use_gravity || frame_gravity2 == nullptr) {
+      if (!hard_gravity || frame_gravity2 == nullptr) {
         for (int i = 0; i < 3; i++) {
           coeffs.emplace_back(curr_row + i, frame_param_idx2 + i, 1);
         }
@@ -422,6 +436,62 @@ void RotationAveragingProblem::BuildConstraintMatrix(
 
       curr_row += 3;
     }
+  }
+
+  // Add soft gravity prior residual rows (2 whitened tangent rows per frame
+  // with a gravity prior). The residual is the (x, z) tangent part of
+  // log(G(g)^T * R_frame), whitened by U with U^T U = lambda * Sigma_t^-1.
+  if (soft_gravity) {
+    const double default_sigma = DegToRad(options_.gravity_prior_sigma_deg);
+    for (const auto& [frame_id, pose_prior] : frame_to_pose_prior_) {
+      if (!pose_prior->HasGravity() || !active_frame_ids_.count(frame_id)) {
+        continue;
+      }
+      const auto param_it = frame_id_to_param_idx_.find(frame_id);
+      if (param_it == frame_id_to_param_idx_.end()) {
+        continue;
+      }
+
+      GravityPriorConstraint prior_constraint;
+      prior_constraint.frame_id = frame_id;
+      prior_constraint.frame_param_idx = param_it->second;
+      prior_constraint.row_index = curr_row;
+      prior_constraint.gravity_aligned_R =
+          GravityAlignedRotation(pose_prior->gravity);
+
+      // Tangent-space 2x2 covariance from the per-image 3x3 covariance
+      // (sensor frame), or isotropic fallback.
+      Eigen::Matrix2d cov_tangent;
+      const auto cov_it =
+          options_.gravity_covariances.find(pose_prior->corr_data_id.id);
+      if (cov_it != options_.gravity_covariances.end()) {
+        Eigen::Matrix<double, 3, 2> tangent_basis;
+        tangent_basis.col(0) = prior_constraint.gravity_aligned_R.col(0);
+        tangent_basis.col(1) = prior_constraint.gravity_aligned_R.col(2);
+        cov_tangent =
+            tangent_basis.transpose() * cov_it->second * tangent_basis;
+      } else {
+        cov_tangent = default_sigma * default_sigma * Eigen::Matrix2d::Identity();
+      }
+      cov_tangent += 1e-12 * Eigen::Matrix2d::Identity();
+
+      const Eigen::Matrix2d information =
+          options_.gravity_prior_weight * cov_tangent.inverse();
+      prior_constraint.whitener =
+          Eigen::LLT<Eigen::Matrix2d>(information).matrixU();
+
+      // Rows: U * P_xz, i.e. row k has entries U(k,0) at the x component and
+      // U(k,1) at the z component of the frame's tangent parameters.
+      const Eigen::Matrix2d& U = prior_constraint.whitener;
+      for (int k = 0; k < 2; k++) {
+        coeffs.emplace_back(curr_row + k, param_it->second + 0, U(k, 0));
+        coeffs.emplace_back(curr_row + k, param_it->second + 2, U(k, 1));
+      }
+      curr_row += 2;
+      gravity_prior_constraints_.push_back(std::move(prior_constraint));
+    }
+    VLOG(2) << gravity_prior_constraints_.size()
+            << " soft gravity prior constraints added";
   }
 
   // Add gauge-fixing constraint for the fixed frame.
@@ -526,7 +596,8 @@ void RotationAveragingProblem::ComputeResiduals() {
       const Eigen::Vector3d* frame_gravity2 =
           GetFrameGravityOrNull(frame_to_pose_prior_, frame_id2);
 
-      if (options_.use_gravity && frame_gravity1 != nullptr) {
+      const bool hard_gravity = options_.use_gravity && !options_.soft_gravity;
+      if (hard_gravity && frame_gravity1 != nullptr) {
         estimated_cam1_from_world =
             RotationFromYAxisAngle(estimated_rotations_[frame_param_idx1]);
       } else {
@@ -534,7 +605,7 @@ void RotationAveragingProblem::ComputeResiduals() {
             estimated_rotations_.segment<3>(frame_param_idx1));
       }
 
-      if (options_.use_gravity && frame_gravity2 != nullptr) {
+      if (hard_gravity && frame_gravity2 != nullptr) {
         estimated_cam2_from_world =
             RotationFromYAxisAngle(estimated_rotations_[frame_param_idx2]);
       } else {
@@ -561,6 +632,24 @@ void RotationAveragingProblem::ComputeResiduals() {
     } else {
       LOG(FATAL) << "Unknown constraint type";
     }
+  }
+
+  // Soft gravity prior residuals: whitened (x, z) tilt components of the
+  // yaw-factored decomposition G(g)^T * R_frame = RotY(psi) * Exp(tau).
+  // Factoring out the (unconstrained, gauge-arbitrary) yaw makes the residual
+  // independent of psi and gives d tau / d delta = -I for the right-side
+  // retraction R <- R * Exp(-delta), matching the +/-I row convention.
+  for (const auto& prior_constraint : gravity_prior_constraints_) {
+    const Eigen::Matrix3d estimated_rig_from_world = AngleAxisToRotationMatrix(
+        estimated_rotations_.segment<3>(prior_constraint.frame_param_idx));
+    const Eigen::Matrix3d misalignment =
+        prior_constraint.gravity_aligned_R.transpose() *
+        estimated_rig_from_world;
+    const double yaw = YAxisAngleFromRotation(misalignment);
+    const Eigen::Vector3d tilt = RotationMatrixToAngleAxis(
+        RotationFromYAxisAngle(yaw).transpose() * misalignment);
+    residuals_.segment<2>(prior_constraint.row_index) =
+        prior_constraint.whitener * Eigen::Vector2d(tilt[0], tilt[2]);
   }
 
   // Fixed frame residual.
@@ -812,6 +901,33 @@ std::optional<Eigen::VectorXd> RotationAveragingSolver::ComputeIRLSWeights(
     } else {
       weights.segment<3>(constraint.row_index).setConstant(w);
     }
+  }
+
+  // Soft gravity prior rows: robust weight on the whitened residual (the
+  // covariance is already folded into the rows; the robust kernel additionally
+  // suppresses the outlier tail of learned priors).
+  for (const auto& prior_constraint : problem.GravityPriorConstraints()) {
+    // Robust weight operates on the raw angular residual (radians), like the
+    // pair rows; the whitening (covariance) stays folded into the rows.
+    const Eigen::Vector2d whitened =
+        problem.Residuals().segment<2>(prior_constraint.row_index);
+    const double err_squared =
+        prior_constraint.whitener.triangularView<Eigen::Upper>()
+            .solve(whitened)
+            .squaredNorm();
+    double w = 0;
+    if (options_.weight_type == RotationEstimatorOptions::GEMAN_MCCLURE) {
+      const double tmp = err_squared + sigma * sigma;
+      w = sigma * sigma / (tmp * tmp);
+    } else if (options_.weight_type == RotationEstimatorOptions::HALF_NORM) {
+      constexpr double kHalfNormExponent = (0.5 - 2) / 2;
+      w = std::pow(err_squared, kHalfNormExponent);
+    }
+    if (std::isnan(w)) {
+      LOG(ERROR) << "nan weight!";
+      return std::nullopt;
+    }
+    weights.segment<2>(prior_constraint.row_index).setConstant(w);
   }
 
   // Set gauge-fixing weights to 1.
