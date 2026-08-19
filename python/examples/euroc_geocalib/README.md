@@ -78,24 +78,34 @@ python run_sfm.py ... --uncalib --focal_init priors --focal_ba \
 
 ## Expected results
 
-Full pipeline @ 300 frames, seed 0, public `pinhole` weights with `--fprior`, soft
-λ=1e-4. Median gauge-aligned rotation error (deg), AUC@0.5/1/2 (x100), registration:
+Full pipeline, all 11 sequences @ 300 frames, seed 0, public `pinhole` weights with
+`--fprior`, soft λ=1e-4. Median gauge-aligned rotation error in degrees over all
+selected frames (unregistered = failure):
 
-| sequence | arm | median | AUC@0.5/1/2 | reg |
-|---|---|---|---|---|
-| MH_01_easy | baseline | 0.83 | 10.0 / 26.8 / 55.1 | 100% |
-| MH_01_easy | + GeoCalib gravity (soft) | 0.84 | 10.0 / 26.7 / 55.1 | 100% |
-| V1_03_difficult | baseline | 9.88 | 0.0 / 0.0 / 0.0 | 99% |
-| V1_03_difficult | + GeoCalib gravity (soft) | **1.82** | 0.0 / 0.0 / 9.8 | 95% |
+| sequence | baseline | + GeoCalib gravity (soft) | GT gravity (oracle, hard) |
+|---|---|---|---|
+| MH_01_easy | 0.83 | 0.83 | 0.83 |
+| MH_02_easy | 0.25 | 0.25 | 0.26 |
+| MH_03_medium | 0.67 | 0.69 | 0.72 |
+| MH_04_difficult | 0.23 | 0.23 | 0.23 |
+| MH_05_difficult | 15.29 | **0.36** | 0.37 |
+| V1_01_easy | 1.88 | 1.89 | 1.88 |
+| V1_02_medium | 0.27 | 0.27 | 0.27 |
+| V1_03_difficult | 8.92 | **0.67** | 0.71 |
+| V2_01_easy | 0.44 | 0.44 | 0.44 |
+| V2_02_medium | 0.73 | 0.72 | 0.73 |
+| V2_03_difficult | 0.61 | 0.56 | 0.51 |
+| **mean** | **2.74** | **0.63** | 0.63 |
+| mean AUC@0.5/1/2 | 18.2 / 36.6 / 54.3 | 22.2 / 45.3 / 66.9 | 21.1 / 44.9 / 67.1 |
 
-On the easy sequence the priors are neutral (bundle adjustment already converges); on
-the hard sequence (fast motion, blur) the baseline reconstruction collapses and the
-GeoCalib priors rescue it (5.4x lower median error). `--ra_only` isolates the
-rotation-averaging stage, where the effect is direct: MH_01 GT-gravity oracle
-1.05 -> 0.81 median; V1_03 GeoCalib priors 5.76 -> 1.95.
+Where the baseline succeeds, the priors are neutral (bundle adjustment already
+converges); where it collapses (MH_05, V1_03: fast motion, blur), the priors rescue the
+reconstruction — and the *learned* priors match the ground-truth-gravity oracle
+end-to-end. `--ra_only` isolates the rotation-averaging stage, where the effect is
+direct and broader (mean median 3.54 -> 2.26, AUC@2 22.5 -> 29.1, wins on 9/11; the
+one RA regression, V2_01, is fully recovered by bundle adjustment).
 
-Observations from the full experiment series (11 sequences, including stronger research
-models):
+Observations from the full experiment series (including stronger research models):
 
 - **Hard injection of learned priors hurts** (tolerance is ~0.5 deg prior noise); soft
   covariance weighting at λ≈1e-4 is what turns the same priors into a gain.
