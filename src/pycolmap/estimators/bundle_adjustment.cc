@@ -314,8 +314,8 @@ void BindBundleAdjuster(py::module& m) {
               &BAOpts::gravity_priors,
               "Optional soft gravity priors: image_id -> unit gravity-down "
               "direction in the camera frame; adds whitened tangent "
-              "residuals on the frame rotation (assumes a gravity-aligned "
-              "gauge, world z up).")
+              "residuals on the frame rotation (assumes COLMAP's "
+              "gravity-aligned gauge: gravity down = +y of the world).")
           .def_readwrite(
               "gravity_covariances",
               &BAOpts::gravity_covariances,

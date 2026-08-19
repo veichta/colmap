@@ -646,7 +646,7 @@ class FocalPriorCostFunction : public ceres::CostFunction {
 // Soft gravity prior: whitened tangent-space residual between the
 // reconstruction's gravity-down direction in the camera frame and the
 // per-image prior direction. Assumes a gravity-aligned reconstruction gauge
-// (world z up), as produced by gravity-aware rotation averaging (see
+// (gravity down = +y world), as produced by gravity-aware rotation averaging (see
 // BundleAdjustmentOptions::gravity_priors). The parameter block is the
 // frame's rig_from_world (quaternion x, y, z, w + translation); the residual
 // is invariant to yaw about the world z axis by construction.
@@ -662,7 +662,9 @@ struct GravityPriorCostFunctor {
                                                        rig_from_world[0],
                                                        rig_from_world[1],
                                                        rig_from_world[2]);
-    const Eigen::Matrix<T, 3, 1> down_world(T(0), T(0), T(-1));
+    // COLMAP's gravity-aligned gauge (from gravity-aware rotation averaging)
+    // has gravity DOWN along +y of the world frame (yaw = rotation about y).
+    const Eigen::Matrix<T, 3, 1> down_world(T(0), T(1), T(0));
     const Eigen::Matrix<T, 3, 1> down_cam =
         cam_from_rig_rot_.cast<T>() * (rig_from_world_rotation * down_world);
     const Eigen::Matrix<T, 2, 1> res = whitened_tangent_.cast<T>() * down_cam;

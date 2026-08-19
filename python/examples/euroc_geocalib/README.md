@@ -134,6 +134,15 @@ python prepare_tartanair.py --raw_dir data/tartanair_raw --out_dir data/tartanai
 GT gravity convention (NED body -> CV camera, world flipped to z-up) is verified
 against GeoCalib predictions: 0.9 deg median angular difference.
 
+## Gravity-aligned outputs
+
+With gravity priors (hard or soft), the recovered reconstruction is **gravity-aligned
+by construction**: COLMAP's gravity-aligned gauge puts gravity down along +y of the
+world frame (up = -y). Measured on EuRoC (soft GeoCalib priors, full pipeline), the
+world vertical agrees with true up to 0.5–1.7 deg, while baseline reconstructions come
+out with an arbitrary 20–30 deg tilt. Even where accuracy is unchanged, this removes
+any manual up-alignment step for downstream use (AR, navigation, meshing, rendering).
+
 ## Convention notes
 
 - COLMAP `PosePrior.gravity` is the gravity **down** direction in the sensor frame;

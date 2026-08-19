@@ -209,8 +209,8 @@ struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   // Optional soft gravity priors: image_id -> unit gravity-down direction in
   // that image's camera frame. Adds two whitened tangent-space residuals on
   // the frame rotation, pulling the reconstruction's down direction toward
-  // the prior. Assumes a gravity-aligned reconstruction gauge (world z up,
-  // down_world = -e_z), as produced by gravity-aware rotation averaging.
+  // the prior. Assumes COLMAP's gravity-aligned reconstruction gauge (gravity
+  // down = +y of the world frame), as produced by gravity-aware rotation averaging.
   std::unordered_map<image_t, Eigen::Vector3d> gravity_priors;
 
   // Optional per-image 3x3 covariance of the gravity direction (camera
