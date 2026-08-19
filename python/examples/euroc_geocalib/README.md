@@ -53,26 +53,27 @@ Three stages, three scripts:
 #    from https://doi.org/10.3929/ethz-b-000690084 and extract to <raw>/<seq>/mav0/.
 python prepare_euroc.py --raw_dir data/euroc_raw --out_dir data/euroc --download
 
-# 2. GeoCalib priors (torch process). --fprior = use the known focal as a prior
-#    (gravity-only solve; recommended in the calibrated setting). For the
-#    uncalibrated track, extract a second, blind priors file WITHOUT --fprior.
+# 2. GeoCalib priors (torch process). Default = fully BLIND: no ground-truth
+#    calibration enters. --shared adds a sequence-level shared-intrinsics focal
+#    solve (recommended). For the calibrated ablation, extract a second file
+#    with the known focal as a prior (--fprior; gravity-only solve).
 for seq in data/euroc/*/; do
-  python extract_priors.py --seq_dir "$seq" --fprior
-  python extract_priors.py --seq_dir "$seq" --out priors_blind.npz
+  python extract_priors.py --seq_dir "$seq" --shared
+  python extract_priors.py --seq_dir "$seq" --fprior --out priors_fprior.npz
 done
 
-# 3. Global SfM with priors (pycolmap process, no torch).
-# Baseline:
+# 3. Global SfM (pycolmap process, no torch). DEFAULT = fully uncalibrated,
+#    everything soft: GeoCalib focal init + soft focal prior in view-graph
+#    calibration and BA, soft covariance-weighted gravity in rotation
+#    averaging and BA.
 python run_sfm.py --data_dir data/euroc --seq all --n 300 --seed 0
-# GeoCalib gravity, soft covariance-weighted (the headline configuration):
-python run_sfm.py --data_dir data/euroc --seq all --n 300 --seed 0 \
-    --gravity priors --soft --lam 1e-4
-# Oracle / noise-control arms:
-python run_sfm.py ... --gravity gt                     # GT gravity, hard injection
-python run_sfm.py ... --gravity gt --noise_deg 1 --soft --lam 1e-4
-# Uncalibrated track (no intrinsics; blind GeoCalib focal init + soft BA prior):
-python run_sfm.py ... --uncalib --focal_init priors --focal_ba \
-    --gravity priors --soft --lam 1e-4 --priors priors_blind.npz
+# Ablations:
+python run_sfm.py ... --gravity none --focal_init none   # plain uncalib baseline
+python run_sfm.py ... --gravity gt [--noise_deg 1]       # gravity oracle / control
+python run_sfm.py ... --hard                             # hard 1-DoF injection
+python run_sfm.py ... --no-focal_vgc --no-focal_ba       # focal fixed at init
+python run_sfm.py ... --no-gravity_ba                    # gravity in RA only
+python run_sfm.py ... --calibrated --priors priors_fprior.npz  # GT intrinsics
 # --ra_only isolates rotation averaging (skips positioning/BA/retriangulation).
 ```
 

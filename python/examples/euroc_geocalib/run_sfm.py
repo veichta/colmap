@@ -1,33 +1,35 @@
-"""Global SfM on prepared EuRoC sequences with (optional) GeoCalib priors.
+"""Global SfM on prepared sequences with GeoCalib priors.
 
-Pipeline: import frames with known PINHOLE intrinsics (or blind with --uncalib) ->
-SIFT -> sequential matching -> COLMAP global mapper -> gauge-aligned global rotation
-errors vs the official ground truth (median + AUC@0.5/1/2 deg) + registration rate.
+DEFAULT MODE = fully uncalibrated, everything soft: no ground-truth intrinsics enter
+anywhere. GeoCalib provides the focal (shared-intrinsics solve or precision-weighted
+fusion of per-frame estimates) as the camera initialization and as a soft prior in
+view-graph calibration and bundle adjustment, and provides per-frame gravity with
+covariances as soft priors in rotation averaging and bundle adjustment.
 
-Gravity priors (--gravity):
-    none    plain global SfM baseline
-    gt      ground-truth gravity from gt.csv, optionally perturbed (--noise_deg);
-            oracle / noise-control arms
-    priors  learned GeoCalib gravity from extract_priors.py (--priors)
+Pipeline: blind import (COLMAP heuristic or GeoCalib focal init) -> SIFT -> sequential
+matching -> view-graph calibration (soft focal prior) -> COLMAP global mapper (soft
+gravity in rotation averaging + soft gravity/focal in BA) -> gauge-aligned global
+rotation errors vs ground truth (median + AUC@0.5/1/2 deg over ALL selected frames,
+unregistered = failure) + registration rate.
 
-Injection mode: hard (default, Pan et al. ECCV'24 -- each gravity frame is reduced to
-1-DoF yaw) or --soft (covariance-weighted residuals in rotation averaging; keeps frames
-3-DoF and weights each prior by its predicted uncertainty; --lam scales the prior
-information). Soft injection is what makes noisy learned priors help instead of hurt.
-
-Focal priors (uncalibrated track, --uncalib): --focal_init priors initializes the
-shared focal from the precision-weighted fusion of the GeoCalib estimates;
---focal_vgc / --focal_ba additionally keep the fused focal as a soft prior in
-view-graph calibration / bundle adjustment.
+Ablation flags:
+    --calibrated          import GT intrinsics from camera.txt (focal priors disabled)
+    --gravity gt|none     GT-gravity oracle (optionally --noise_deg) / no gravity
+    --hard                hard 1-DoF gravity injection (Pan et al. ECCV'24) instead of
+                          soft covariance-weighted residuals (soft is what makes noisy
+                          learned priors help instead of hurt; --lam scales the RA
+                          prior information)
+    --focal_init none / --no-focal_vgc / --no-focal_ba / --no-gravity_ba
+                          disable individual prior injection points
+    --ra_only             stop after rotation averaging (stage-isolated effect)
 
 This script deliberately does NOT import torch (run extract_priors.py in a separate
 process first): importing torch next to pycolmap silently breaks multi-threaded Ceres
 sparse solves.
 
 Usage (single sequence or all prepared sequences):
-    python run_sfm.py --data_dir <prepared_root> --seq MH_01_easy --n 300 --seed 0 \
-        --gravity priors --priors priors.npz --soft --lam 1e-4
-    python run_sfm.py --data_dir <prepared_root> --seq all ...
+    python run_sfm.py --data_dir <prepared_root> --seq all --n 300 --seed 0
+    python run_sfm.py --data_dir <prepared_root> --seq all --gravity none  # baseline
 """
 
 import argparse
@@ -95,23 +97,19 @@ def run_sequence(args, seq: str) -> dict:
     fx, fy, cx, cy = [float(v) for v in cam_line[1:5]]
     gt = load_gt(seq_dir)
 
-    tag = args.gravity
+    tag = "calib" if args.calibrated else "uncalib"
+    tag += f"-grav_{args.gravity}"
+    if args.gravity != "none":
+        tag += "-hard" if args.hard else f"-soft{args.lam}"
+        if args.gravity_ba:
+            tag += f"-gba{args.gravity_ba_weight}"
     if args.noise_deg > 0:
         tag += f"-noise{args.noise_deg}"
     if args.gate_frac < 1.0:
         tag += f"-gate{args.gate_frac}"
-    if args.soft:
-        tag += f"-soft{args.lam}"
-    if args.gravity_ba:
-        tag += f"-gba{args.gravity_ba_weight}"
-    if args.uncalib:
-        tag += "-uncalib"
-    if args.focal_init != "none":
-        tag += f"-finit_{args.focal_init}"
-    if args.focal_vgc:
-        tag += f"-fvgc{args.vgc_sigma_scale}"
-    if args.focal_ba:
-        tag += "-fba"
+    if args.focal_init == "priors":
+        tag += ("-finit" + ("-fvgc" if args.focal_vgc else "")
+                + ("-fba" if args.focal_ba else ""))
     if args.refine_pp:
         tag += "-refpp"
     if args.ra_only:
@@ -361,40 +359,53 @@ def main():
     parser.add_argument("--seq", default="MH_01_easy",
                         help="sequence name, or 'all' for every prepared sequence")
     parser.add_argument("--n", type=int, default=300)
-    parser.add_argument("--gravity", choices=["none", "gt", "priors"], default="none")
+    # DEFAULT = fully uncalibrated, everything soft: no ground-truth intrinsics
+    # anywhere; GeoCalib focal initializes the camera and stays a soft prior in
+    # view-graph calibration and bundle adjustment; GeoCalib gravity enters
+    # rotation averaging (soft, covariance-weighted) and bundle adjustment.
+    parser.add_argument("--calibrated", action="store_true",
+                        help="ablation: import the known intrinsics from camera.txt "
+                             "(disables all focal priors)")
+    parser.add_argument("--gravity", choices=["priors", "gt", "none"],
+                        default="priors")
     parser.add_argument("--priors", default="priors.npz",
                         help="priors file inside each sequence dir "
-                             "(from extract_priors.py)")
+                             "(from extract_priors.py; extract WITHOUT --fprior for "
+                             "the uncalibrated mode)")
     parser.add_argument("--noise_deg", type=float, default=0.0,
                         help="gt only: perturb gravity by Gaussian angular noise")
     parser.add_argument("--gate_frac", type=float, default=1.0,
                         help="priors only: keep this fraction of frames with lowest "
                              "predicted gravity uncertainty")
-    parser.add_argument("--soft", action="store_true",
-                        help="soft covariance-weighted gravity instead of hard 1-DoF")
+    parser.add_argument("--hard", action="store_true",
+                        help="ablation: hard 1-DoF gravity injection instead of the "
+                             "default soft covariance-weighted mode")
     parser.add_argument("--lam", type=float, default=1e-4,
                         help="soft mode: global scale on the prior information "
                              "(rotation averaging)")
-    parser.add_argument("--gravity_ba", action="store_true",
-                        help="also add the gravity priors as soft covariance-weighted "
-                             "residuals in bundle adjustment (requires a gravity-aware "
-                             "rotation averaging arm for the z-up gauge)")
+    parser.add_argument("--gravity_ba", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="add the gravity priors as soft covariance-weighted "
+                             "residuals in bundle adjustment")
     parser.add_argument("--gravity_ba_weight", type=float, default=1.0,
                         help="global scale on the BA gravity prior information "
                              "(BA residuals are whitened, so 1.0 = the prior's own "
-                             "covariance; no lambda rebalancing needed)")
-    parser.add_argument("--uncalib", action="store_true",
-                        help="import without known intrinsics")
+                             "covariance)")
     parser.add_argument("--refine_pp", action="store_true",
                         help="let global BA refine the principal point")
-    parser.add_argument("--focal_init", choices=["none", "priors"], default="none",
-                        help="uncalib only: initialize the shared focal from the "
-                             "fused GeoCalib estimates")
-    parser.add_argument("--focal_vgc", action="store_true",
+    parser.add_argument("--focal_init", choices=["priors", "none"],
+                        default="priors",
+                        help="initialize the shared focal from the GeoCalib "
+                             "estimates (shared-intrinsics solve if present, else "
+                             "precision-weighted fusion)")
+    parser.add_argument("--focal_vgc", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="refine the focal in view-graph calibration with the "
-                             "fused GeoCalib focal as a soft prior")
-    parser.add_argument("--focal_ba", action="store_true",
-                        help="add the fused GeoCalib focal as a soft prior in BA")
+                             "GeoCalib focal as a soft prior (instead of fixing it "
+                             "at import)")
+    parser.add_argument("--focal_ba", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="keep the GeoCalib focal as a soft prior in BA")
     parser.add_argument("--vgc_sigma_scale", type=float, default=1.0)
     parser.add_argument("--ra_only", action="store_true",
                         help="skip all stages after rotation averaging (isolates the "
@@ -406,6 +417,16 @@ def main():
     parser.add_argument("--out", type=Path, default=None,
                         help="write per-sequence metrics to this JSON file")
     args = parser.parse_args()
+
+    # Normalize flag interactions (defaults = fully uncalibrated, all priors soft).
+    args.uncalib = not args.calibrated
+    args.soft = args.gravity != "none" and not args.hard
+    if args.calibrated:
+        args.focal_init = "none"
+    if args.focal_init != "priors":
+        args.focal_vgc = args.focal_ba = False
+    if args.gravity == "none":
+        args.gravity_ba = False
 
     if args.gravity == "priors" or args.focal_init == "priors":
         missing = []
