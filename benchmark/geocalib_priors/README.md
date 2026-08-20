@@ -1,21 +1,33 @@
-# GeoCalib priors for COLMAP global SfM — EuRoC benchmark
+# GeoCalib priors for COLMAP global SfM
 
-End-to-end reproduction of the GeoCalib-prior experiments on the EuRoC MAV dataset:
-single-image gravity and focal priors (with predicted uncertainties) from
-[GeoCalib](https://github.com/cvg/GeoCalib), injected into COLMAP's global mapper as
-**soft, covariance-weighted constraints**.
+Fully **uncalibrated** structure-from-motion with learned single-image priors:
+[GeoCalib](https://github.com/cvg/GeoCalib) provides per-frame gravity directions and a
+sequence-level focal length (with covariances), injected into COLMAP's global mapper as
+**soft, covariance-weighted constraints** at every stage that can take them. No
+ground-truth calibration enters anywhere. Benchmarks: EuRoC MAV (real) and TartanAir
+(synthetic).
 
-This fork adds to upstream COLMAP (see the fork's top commit for the full diff):
+This fork adds to upstream COLMAP (see the fork's commits for the full diff):
 
-- **Soft covariance-weighted gravity** in rotation averaging
+- **Soft covariance-weighted gravity in rotation averaging**
   (`RotationEstimatorOptions.{soft_gravity, gravity_prior_weight, gravity_prior_sigma_deg,
   gravity_covariances}`). Unlike the hard gravity-aligned mode (Pan et al. ECCV'24, which
   reduces each gravity frame to 1-DoF yaw and treats the prior as exact), soft mode keeps
   all frames 3-DoF and adds per-frame whitened residuals weighted by each prior's
   covariance. Hard injection helps only for priors better than ~0.5 deg; soft injection
-  makes noisy learned priors (1–2.5 deg) help instead of hurt.
-- **Soft focal priors** in view-graph calibration (`ViewGraphCalibrationOptions.focal_priors`)
-  and bundle adjustment (`BundleAdjustmentOptions.focal_priors`).
+  makes noisy learned priors (1–2.5 deg) usable.
+- **Soft gravity priors in bundle adjustment**
+  (`BundleAdjustmentOptions.{gravity_priors, gravity_covariances, gravity_prior_weight}`):
+  whitened tangent residuals on the frame rotations (yaw-invariant; assumes COLMAP's
+  gravity-aligned gauge, gravity down = +y world).
+- **Joint gravity+focal prior in bundle adjustment**
+  (`BundleAdjustmentOptions.gravity_focal_priors`): per image, 3 whitened residuals
+  coupling the frame rotation and the camera focal length with the full 4x4
+  (down-direction, focal) covariance — including the pitch↔focal cross terms that
+  encode the depth-of-ambiguity structure of single-image calibration.
+- **Soft focal priors** in view-graph calibration
+  (`ViewGraphCalibrationOptions.focal_priors`) and bundle adjustment
+  (`BundleAdjustmentOptions.focal_priors`).
 - pybind bindings for all of the above.
 
 ## Setup
@@ -45,19 +57,29 @@ Notes:
 
 ## Usage
 
-Three stages, three scripts:
+Three stages, three scripts (`prepare_* -> extract_priors -> run_sfm`):
 
 ```bash
-# 1. Download + prepare (undistort cam0 to a centered-pp pinhole camera, export GT).
-#    If --download fails (the legacy ASL server is unreliable), fetch the sequence zips
-#    from https://doi.org/10.3929/ethz-b-000690084 and extract to <raw>/<seq>/mav0/.
+# 1a. EuRoC: download + prepare (undistort cam0 to a centered-pp pinhole camera,
+#     export GT). If --download fails (the legacy ASL server is unreliable), fetch
+#     the sequence zips from https://doi.org/10.3929/ethz-b-000690084 and extract
+#     to <raw>/<seq>/mav0/.
 python prepare_euroc.py --raw_dir data/euroc_raw --out_dir data/euroc --download
 
+# 1b. TartanAir: download per-environment image_left.zip files (~2–11 GB each,
+#     poses included; see https://github.com/castacks/tartanair_tools), then:
+python prepare_tartanair.py --raw_dir data/tartanair_raw --out_dir data/tartanair \
+    --envs japanesealley carwelding --difficulty Easy   # and/or Hard
+
 # 2. GeoCalib priors (torch process). Default = fully BLIND: no ground-truth
-#    calibration enters. Per-frame solves keep their full covariances; the
-#    whole-sequence joint (gravity, shared-focal) covariance is assembled from
-#    them in closed form (block-arrow structure). For the calibrated ablation,
-#    extract a second file with the known focal as a prior (--fprior).
+#    calibration enters. Per-frame solves keep their full (roll, pitch, focal)
+#    covariances; the whole-sequence joint (gravity, shared-focal) covariance —
+#    including the pitch<->focal cross terms — is assembled from them in closed
+#    form (the shared-focal information matrix is block-arrow). The shared focal
+#    variance is floored at the per-frame spread: learned calibrators have
+#    common-mode bias, so summed informations are otherwise grossly overconfident.
+#    For the calibrated ablation, extract a second file with the known focal as a
+#    prior (--fprior).
 for seq in data/euroc/*/; do
   python extract_priors.py --seq_dir "$seq"
   python extract_priors.py --seq_dir "$seq" --fprior --out priors_fprior.npz
@@ -65,62 +87,70 @@ done
 
 # 3. Global SfM (pycolmap process, no torch). DEFAULT = fully uncalibrated,
 #    everything soft: GeoCalib focal init + soft focal prior in view-graph
-#    calibration and BA, soft covariance-weighted gravity in rotation
-#    averaging and BA.
+#    calibration, soft covariance-weighted gravity in rotation averaging
+#    (lam 1e-5), and the JOINT gravity+focal prior in BA (weight 0.3).
 python run_sfm.py --data_dir data/euroc --seq all --n 300 --seed 0
 # Ablations:
 python run_sfm.py ... --gravity none --focal_init none   # plain uncalib baseline
+python run_sfm.py ... --gravity none                     # focal priors only
 python run_sfm.py ... --gravity gt [--noise_deg 1]       # gravity oracle / control
 python run_sfm.py ... --hard                             # hard 1-DoF injection
+python run_sfm.py ... --no-joint_ba                      # separate BA priors
 python run_sfm.py ... --no-focal_vgc --no-focal_ba       # focal fixed at init
-python run_sfm.py ... --no-gravity_ba                    # gravity in RA only
+python run_sfm.py ... --no-gravity_ba --no-joint_ba      # gravity in RA only
 python run_sfm.py ... --calibrated --priors priors_fprior.npz  # GT intrinsics
 # --ra_only isolates rotation averaging (skips positioning/BA/retriangulation).
 ```
 
-## Expected results (fully uncalibrated / blind)
+Metrics are gauge-aligned global rotation errors vs GT, scored over **all** selected
+frames with unregistered frames counted as failures, so arms with different
+registration rates share the same denominator.
 
-No ground-truth calibration enters anywhere; public `pinhole` weights; 300 frames/seq,
-seed 0. Mean of per-sequence medians (deg) and mean AUC@0.5/1/2 (x100) over all
-selected frames (unregistered = failure):
+## Results (fully uncalibrated / blind)
+
+Public `pinhole` weights; 300 frames/seq, seed 0. Mean of per-sequence medians (deg),
+mean AUC@0.5/1/2 (x100), mean registration:
 
 **EuRoC (11 sequences):**
 
-| arm | mean median | mean AUC@0.5/1/2 |
-|---|---|---|
-| plain uncalibrated glomap | 3.81 | 8.5 / 20.7 / 36.0 |
-| + GeoCalib focal priors | **0.65** | 21.3 / 44.2 / **65.1** |
-| + blind gravity too (joint BA) | 1.60 | 17.7 / 34.7 / 53.9 |
+| arm | mean median | mean AUC@0.5/1/2 | reg |
+|---|---|---|---|
+| plain uncalibrated glomap | 3.81 | 8.5 / 20.7 / 36.0 | 95.9% |
+| + GeoCalib focal priors | **0.65** | 21.3 / 44.2 / **65.1** | 95.9% |
+| + blind gravity too (joint BA, tuned) | 1.53 | 19.6 / 39.0 / 58.4 | 96.1% |
 
 **TartanAir (22 trajectories, Easy+Hard):**
 
-| arm | mean AUC@0.5/1/2 |
-|---|---|
-| plain uncalibrated glomap | 27.0 / 31.8 / 34.7 |
-| + GeoCalib focal priors | 44.6 / 58.6 / 69.0 |
-| + blind gravity too (joint BA) | 49.2 / 62.8 / **72.8** |
-| GT gravity + GeoCalib focal | 66.8 / 76.1 / 82.9 |
+| arm | mean AUC@0.5/1/2 | reg |
+|---|---|---|
+| plain uncalibrated glomap | 27.0 / 31.8 / 34.7 | 96.3% |
+| + GeoCalib focal priors | 44.6 / 58.6 / 69.0 | 96.0% |
+| + blind gravity too (joint BA, tuned) | **50.3 / 65.4 / 76.2** | 95.5% |
+| GT gravity + GeoCalib focal | 66.8 / 76.1 / 82.9 | 94.7% |
 
-With the tuned defaults (RA λ=1e-5, BA prior weight 0.3), the full joint arm reaches
-mean AUC@0.5/1/2 = 50.3 / 65.4 / 76.2 on TartanAir (95.5% reg) — the best arm there.
+Takeaways:
 
-Takeaways: the **soft focal prior alone eliminates the uncalibrated basin lottery** on
-both datasets (every baseline collapse rescued, never harmful) — despite the blind
-focal estimate being ~5% biased, because the prior is honestly weak (variance floored
-at the per-frame spread) and defers to two-view geometry where it is strong. Blind
-gravity adds a further gain when the gravity priors are good (TartanAir, ~0.9 deg) but
-can hurt when their errors are correlated across frames (EuRoC V2_01: 2 deg median
-error, consistently oriented; uncertainty gating does NOT fix this, since the confident
-priors are the consistently wrong ones — the failure is a nondeterministic basin
-lottery, so detect it per run via registration/consistency and fall back to
-focal-only priors). The GT-gravity row shows the headroom a better gravity model
-would unlock.
+- The **soft focal prior alone eliminates the uncalibrated basin lottery** on both
+  datasets (every baseline collapse rescued, never harmful) — despite the blind focal
+  estimate being ~5% biased, because the prior is honestly weak (variance floored at
+  the per-frame spread) and defers to two-view geometry where it is strong.
+- **Blind gravity adds a further gain when the gravity priors are good** (TartanAir,
+  ~0.9 deg median: best arm overall) **but can hurt when their errors are correlated
+  across frames** (EuRoC: ~2 deg, viewpoint-correlated). A world-constant prior bias is
+  absorbed into the gauge and harmless; the viewpoint-correlated component votes for
+  contradictory world-ups. On susceptible scenes this manifests as a
+  **nondeterministic basin lottery** (identical config alternates between ~0.4 deg and
+  ~10 deg across runs); uncertainty gating does not help, since the confident priors
+  are the consistently wrong ones. Operational policy: detect a degraded run (drop in
+  registration, reprojection error, prior-vs-output gravity disagreement) and fall
+  back to focal-only priors.
+- The GT-gravity row shows the headroom a better gravity model would unlock.
 
-## Expected results (calibrated ablation)
+## Results (calibrated ablation)
 
-GT intrinsics + `--fprior` gravity priors (gravity-only LM solve). Full pipeline, all 11 sequences @ 300 frames, seed 0, public `pinhole` weights with
-`--fprior`, soft λ=1e-4. Median gauge-aligned rotation error in degrees over all
-selected frames (unregistered = failure):
+GT intrinsics + `--fprior` gravity priors (gravity-only LM solve, ~1.0 deg median vs
+GT), soft λ=1e-4, separate BA priors. Median rotation error (deg) over all selected
+frames:
 
 | sequence | baseline | + GeoCalib gravity (soft) | GT gravity (oracle, hard) |
 |---|---|---|---|
@@ -137,41 +167,32 @@ selected frames (unregistered = failure):
 | V2_03_difficult | 0.61 | 0.56 | 0.51 |
 | **mean** | **2.74** | **0.63** | 0.63 |
 | mean AUC@0.5/1/2 | 18.2 / 36.6 / 54.3 | 22.2 / 45.3 / 66.9 | 21.1 / 44.9 / 67.1 |
+| mean reg | 98.9% | 97.3% | 98.6% |
 
 Where the baseline succeeds, the priors are neutral (bundle adjustment already
 converges); where it collapses (MH_05, V1_03: fast motion, blur), the priors rescue the
 reconstruction — and the *learned* priors match the ground-truth-gravity oracle
 end-to-end. `--ra_only` isolates the rotation-averaging stage, where the effect is
-direct and broader (mean median 3.54 -> 2.26, AUC@2 22.5 -> 29.1, wins on 9/11; the
-one RA regression, V2_01, is fully recovered by bundle adjustment).
+direct and broader (mean median 3.54 -> 2.26, AUC@2 22.5 -> 29.1, wins on 9/11).
 
-Observations from the full experiment series (including stronger research models):
+General observations:
 
 - **Hard injection of learned priors hurts** (tolerance is ~0.5 deg prior noise); soft
-  covariance weighting at λ≈1e-4 is what turns the same priors into a gain.
-- With intrinsics known, the **focal prior** (`--fprior`) substantially improves the
-  gravity priors (the LM no longer trades pitch against focal). On the sequences
-  prepared here, GeoCalib gravity is ~1.0 deg median vs ground truth.
-- Gains concentrate where SfM is weak; on easy sequences priors are neutral, never
-  harmful (in soft mode).
+  covariance weighting is what turns the same priors into a gain.
+- With intrinsics known, the **focal prior to GeoCalib** (`--fprior`) substantially
+  improves the gravity priors (the LM no longer trades pitch against focal).
+- Gains concentrate where SfM is weak; on easy sequences priors are neutral.
 
-## TartanAir (synthetic benchmark)
+## Datasets
 
-`prepare_tartanair.py` prepares TartanAir trajectories into the same layout — a fully
-synthetic complement to EuRoC: perfect pinhole camera with *exactly* centered pp
-(fx = fy = 320, cx = 320, cy = 240 at 640x480), zero distortion (no undistortion or
-resampling at all), exact poses, gravity-aligned NED world. Download per-environment
-`image_left.zip` files (~2–11 GB each, poses included) from the AirLab server (see
-https://github.com/castacks/tartanair_tools), then:
+**EuRoC** (`prepare_euroc.py`): raw ASL cam0 is undistorted to a centered-pp pinhole
+camera; GT poses from the official `state_groundtruth_estimate0` + cam0 `T_BS`.
 
-```bash
-python prepare_tartanair.py --raw_dir data/tartanair_raw --out_dir data/tartanair \
-    --envs japanesealley carwelding
-# then extract_priors.py / run_sfm.py exactly as for EuRoC
-```
-
-GT gravity convention (NED body -> CV camera, world flipped to z-up) is verified
-against GeoCalib predictions: 0.9 deg median angular difference.
+**TartanAir** (`prepare_tartanair.py`): fully synthetic complement — perfect pinhole
+camera with *exactly* centered pp (fx = fy = 320, cx = 320, cy = 240 at 640x480), zero
+distortion (no resampling at all), exact poses, gravity-aligned NED world. The NED
+body -> CV camera / z-up world conversion is verified against GeoCalib predictions
+(0.9 deg median angular difference).
 
 ## Gravity-aligned outputs
 
