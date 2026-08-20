@@ -59,16 +59,34 @@ def compute_auc(errors, thresholds):
 
 
 def load_gt(seq_dir: Path):
-    """Return dict name -> R_cam0_from_world from gt.csv."""
+    """Return dict name -> (R_cam_from_world, t_cam_from_world) from gt.csv."""
     lookup = {}
     with open(seq_dir / "gt.csv") as f:
         next(f)  # header
         for line in f:
-            name, qw, qx, qy, qz = line.strip().split(",")[:5]
-            lookup[name] = Rotation.from_quat(
-                [float(qx), float(qy), float(qz), float(qw)]
+            p = line.strip().split(",")
+            R = Rotation.from_quat(
+                [float(p[2]), float(p[3]), float(p[4]), float(p[1])]
             ).as_matrix()
+            t = np.array([float(p[5]), float(p[6]), float(p[7])])
+            lookup[p[0]] = (R, t)
     return lookup
+
+
+def umeyama_align(src: np.ndarray, dst: np.ndarray):
+    """Similarity transform (s, R, t) minimizing ||s R src + t - dst||."""
+    mu_s, mu_d = src.mean(0), dst.mean(0)
+    xs, xd = src - mu_s, dst - mu_d
+    cov = xd.T @ xs / len(src)
+    U, D, Vt = np.linalg.svd(cov)
+    S = np.eye(3)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[2, 2] = -1
+    R = U @ S @ Vt
+    var_s = (xs**2).sum() / len(src)
+    s = np.trace(np.diag(D) @ S) / max(var_s, 1e-12)
+    t = mu_d - s * R @ mu_s
+    return s, R, t
 
 
 def load_priors(seq_dir: Path, priors_file: str):
@@ -143,7 +161,7 @@ def run_sequence(args, seq: str) -> dict:
     use_joint = (args.joint_ba and args.gravity == "priors"
                  and gf_cov is not None and not args.calibrated)
 
-    f_fused = sigma_fused = spread = None
+    f_fused = sigma_fused = spread = focal_vgc_est = None
     if args.uncalib and args.focal_init == "priors":
         fs = np.array([priors[n][3] for n in sel if n in priors])
         spread = float(np.std(fs))
@@ -209,6 +227,7 @@ def run_sequence(args, seq: str) -> dict:
         pycolmap.calibrate_view_graph(db, vgc_opts)
         with pycolmap.Database.open(db) as database:
             for cam_db in database.read_all_cameras():
+                focal_vgc_est = float(np.mean(np.array(cam_db.params)[:2]))
                 print(f"after view-graph calibration: "
                       f"{[round(float(v), 2) for v in cam_db.params]} "
                       f"(true {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f})")
@@ -248,7 +267,7 @@ def run_sequence(args, seq: str) -> dict:
             if args.gravity == "gt":
                 if name not in gt:
                     return None
-                g = gt[name] @ np.array([0.0, 0.0, -1.0])
+                g = gt[name][0] @ np.array([0.0, 0.0, -1.0])
                 if args.noise_deg > 0:
                     axis = np.cross(g, rng.normal(size=3))
                     axis /= np.linalg.norm(axis)
@@ -322,24 +341,30 @@ def run_sequence(args, seq: str) -> dict:
         print("NO RECONSTRUCTION")
         return {"seq": seq, "failed": True}
     rec = max(recs.values(), key=lambda r: r.num_images())
+    est = [float(v) for v in list(rec.cameras.values())[0].params]
+    focal_est = float(np.mean(est[:2])) if len(est) >= 2 else est[0]
     if args.uncalib:
-        est = list(rec.cameras.values())[0].params
-        print(f"estimated intrinsics: {[round(float(v), 2) for v in est]} "
+        print(f"estimated intrinsics: {[round(v, 2) for v in est]} "
               f"(true {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f})")
 
-    # --- gauge-aligned rotation errors vs GT ---
-    R_est, R_gt = [], []
-    for im in rec.images.values():
+    # --- gauge-aligned rotation errors + Sim(3)-aligned ATE vs GT ---
+    R_est, R_gt, C_est, C_gt, reg_names = [], [], [], [], []
+    for im in sorted(rec.images.values(), key=lambda i: i.name):
         try:
             cw = im.cam_from_world
             cw = cw() if callable(cw) else cw
-            R = np.asarray(cw.matrix())[:3, :3]
+            T = np.asarray(cw.matrix())
         except Exception:
             continue  # deregistered frame without pose
         if im.name not in gt:
             continue
+        R, t = T[:3, :3], T[:3, 3]
+        Rg, tg = gt[im.name]
         R_est.append(R)
-        R_gt.append(gt[im.name])
+        R_gt.append(Rg)
+        C_est.append(-R.T @ t)
+        C_gt.append(-Rg.T @ tg)
+        reg_names.append(im.name)
     R_est, R_gt = np.stack(R_est), np.stack(R_gt)
     S = Rotation.concatenate(
         [Rotation.from_matrix(e.T @ g) for e, g in zip(R_est, R_gt)]
@@ -359,6 +384,22 @@ def run_sequence(args, seq: str) -> dict:
           f"median-registered {np.median(errs):.3f}  max {errs.max():.3f}")
     print(f"AUC@0.5/1/2: {100 * auc[0]:.1f} / {100 * auc[1]:.1f} / {100 * auc[2]:.1f}")
     print(f"registration: {len(errs)}/{len(sel)} = {100 * len(errs) / len(sel):.1f}%")
+
+    # ATE: Sim(3) (Umeyama) alignment of camera centers (monocular scale is free).
+    C_est, C_gt = np.stack(C_est), np.stack(C_gt)
+    sc, Ra, ta = umeyama_align(C_est, C_gt)
+    ate = np.linalg.norm((sc * (Ra @ C_est.T).T + ta) - C_gt, axis=1)
+    # Relative rotation between consecutive registered frames (gauge-free; the
+    # accuracy of two-view rotations depends directly on the intrinsics).
+    relrot = np.array([
+        np.degrees(Rotation.from_matrix(
+            (R_est[i + 1] @ R_est[i].T) @ (R_gt[i + 1] @ R_gt[i].T).T
+        ).magnitude())
+        for i in range(len(R_est) - 1)
+    ])
+    print(f"ATE (Sim3): rmse {np.sqrt((ate**2).mean()):.3f}  "
+          f"median {np.median(ate):.3f}  |  rel-rot median {np.median(relrot):.3f} deg"
+          f"  |  focal {focal_est:.1f} (true {fy:.1f}, err {100 * (focal_est - fy) / fy:+.1f}%)")
     return {
         "seq": seq,
         "tag": tag,
@@ -369,6 +410,17 @@ def run_sequence(args, seq: str) -> dict:
         **{f"auc@{t}": a for t, a in zip(thresholds, auc)},
         "registered": len(errs),
         "total": len(sel),
+        "ate_rmse": float(np.sqrt((ate**2).mean())),
+        "ate_median": float(np.median(ate)),
+        "relrot_median": float(np.median(relrot)),
+        "relrot_auc1": float(compute_auc(relrot, [1.0])[0]),
+        "focal_est": focal_est,
+        "focal_true": float(fy),
+        "focal_err_pct": float(100 * (focal_est - fy) / fy),
+        "focal_vgc": focal_vgc_est,
+        "focal_prior": f_fused,
+        "intrinsics_est": est,
+        "pp_est": est[-2:] if args.refine_pp else None,
     }
 
 
