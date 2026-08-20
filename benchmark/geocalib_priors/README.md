@@ -101,15 +101,20 @@ selected frames (unregistered = failure):
 | + blind gravity too (joint BA) | 49.2 / 62.8 / **72.8** |
 | GT gravity + GeoCalib focal | 66.8 / 76.1 / 82.9 |
 
+With the tuned defaults (RA λ=1e-5, BA prior weight 0.3), the full joint arm reaches
+mean AUC@0.5/1/2 = 50.3 / 65.4 / 76.2 on TartanAir (95.5% reg) — the best arm there.
+
 Takeaways: the **soft focal prior alone eliminates the uncalibrated basin lottery** on
 both datasets (every baseline collapse rescued, never harmful) — despite the blind
 focal estimate being ~5% biased, because the prior is honestly weak (variance floored
 at the per-frame spread) and defers to two-view geometry where it is strong. Blind
 gravity adds a further gain when the gravity priors are good (TartanAir, ~0.9 deg) but
 can hurt when their errors are correlated across frames (EuRoC V2_01: 2 deg median
-error, consistently oriented -> corrupts rotation averaging; uncertainty gating does
-NOT fix this, since the confident priors are the consistently wrong ones). The
-GT-gravity row shows the headroom a better gravity model would unlock.
+error, consistently oriented; uncertainty gating does NOT fix this, since the confident
+priors are the consistently wrong ones — the failure is a nondeterministic basin
+lottery, so detect it per run via registration/consistency and fall back to
+focal-only priors). The GT-gravity row shows the headroom a better gravity model
+would unlock.
 
 ## Expected results (calibrated ablation)
 

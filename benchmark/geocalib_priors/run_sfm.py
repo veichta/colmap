@@ -400,7 +400,7 @@ def main():
     parser.add_argument("--hard", action="store_true",
                         help="ablation: hard 1-DoF gravity injection instead of the "
                              "default soft covariance-weighted mode")
-    parser.add_argument("--lam", type=float, default=1e-4,
+    parser.add_argument("--lam", type=float, default=1e-5,
                         help="soft mode: global scale on the prior information "
                              "(rotation averaging)")
     parser.add_argument("--joint_ba", action=argparse.BooleanOptionalAction,
@@ -412,7 +412,7 @@ def main():
                         default=True,
                         help="ablation fallback: separate gravity-only priors in BA "
                              "(used when the joint prior is disabled or unavailable)")
-    parser.add_argument("--gravity_ba_weight", type=float, default=1.0,
+    parser.add_argument("--gravity_ba_weight", type=float, default=0.3,
                         help="global scale on the BA gravity prior information "
                              "(BA residuals are whitened, so 1.0 = the prior's own "
                              "covariance)")
