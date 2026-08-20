@@ -77,9 +77,42 @@ python run_sfm.py ... --calibrated --priors priors_fprior.npz  # GT intrinsics
 # --ra_only isolates rotation averaging (skips positioning/BA/retriangulation).
 ```
 
-## Expected results
+## Expected results (fully uncalibrated / blind)
 
-Full pipeline, all 11 sequences @ 300 frames, seed 0, public `pinhole` weights with
+No ground-truth calibration enters anywhere; public `pinhole` weights; 300 frames/seq,
+seed 0. Mean of per-sequence medians (deg) and mean AUC@0.5/1/2 (x100) over all
+selected frames (unregistered = failure):
+
+**EuRoC (11 sequences):**
+
+| arm | mean median | mean AUC@0.5/1/2 |
+|---|---|---|
+| plain uncalibrated glomap | 3.81 | 8.5 / 20.7 / 36.0 |
+| + GeoCalib focal priors | **0.65** | 21.3 / 44.2 / **65.1** |
+| + blind gravity too (joint BA) | 1.60 | 17.7 / 34.7 / 53.9 |
+
+**TartanAir (22 trajectories, Easy+Hard):**
+
+| arm | mean AUC@0.5/1/2 |
+|---|---|
+| plain uncalibrated glomap | 27.0 / 31.8 / 34.7 |
+| + GeoCalib focal priors | 44.6 / 58.6 / 69.0 |
+| + blind gravity too (joint BA) | 49.2 / 62.8 / **72.8** |
+| GT gravity + GeoCalib focal | 66.8 / 76.1 / 82.9 |
+
+Takeaways: the **soft focal prior alone eliminates the uncalibrated basin lottery** on
+both datasets (every baseline collapse rescued, never harmful) — despite the blind
+focal estimate being ~5% biased, because the prior is honestly weak (variance floored
+at the per-frame spread) and defers to two-view geometry where it is strong. Blind
+gravity adds a further gain when the gravity priors are good (TartanAir, ~0.9 deg) but
+can hurt when their errors are correlated across frames (EuRoC V2_01: 2 deg median
+error, consistently oriented -> corrupts rotation averaging; uncertainty gating does
+NOT fix this, since the confident priors are the consistently wrong ones). The
+GT-gravity row shows the headroom a better gravity model would unlock.
+
+## Expected results (calibrated ablation)
+
+GT intrinsics + `--fprior` gravity priors (gravity-only LM solve). Full pipeline, all 11 sequences @ 300 frames, seed 0, public `pinhole` weights with
 `--fprior`, soft λ=1e-4. Median gauge-aligned rotation error in degrees over all
 selected frames (unregistered = failure):
 
