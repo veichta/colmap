@@ -54,11 +54,12 @@ Three stages, three scripts:
 python prepare_euroc.py --raw_dir data/euroc_raw --out_dir data/euroc --download
 
 # 2. GeoCalib priors (torch process). Default = fully BLIND: no ground-truth
-#    calibration enters. --shared adds a sequence-level shared-intrinsics focal
-#    solve (recommended). For the calibrated ablation, extract a second file
-#    with the known focal as a prior (--fprior; gravity-only solve).
+#    calibration enters. Per-frame solves keep their full covariances; the
+#    whole-sequence joint (gravity, shared-focal) covariance is assembled from
+#    them in closed form (block-arrow structure). For the calibrated ablation,
+#    extract a second file with the known focal as a prior (--fprior).
 for seq in data/euroc/*/; do
-  python extract_priors.py --seq_dir "$seq" --shared
+  python extract_priors.py --seq_dir "$seq"
   python extract_priors.py --seq_dir "$seq" --fprior --out priors_fprior.npz
 done
 
