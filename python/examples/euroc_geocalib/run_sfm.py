@@ -484,7 +484,8 @@ def main():
         print(f"{'MEAN':<20} {np.mean([r['median'] for r in ok]):>7.3f} "
               f"{100 * np.mean([r['auc@0.5'] for r in ok]):>8.1f} "
               f"{100 * np.mean([r['auc@1'] for r in ok]):>7.1f} "
-              f"{100 * np.mean([r['auc@2'] for r in ok]):>7.1f}")
+              f"{100 * np.mean([r['auc@2'] for r in ok]):>7.1f} "
+              f"{100 * np.mean([r['registered'] / r['total'] for r in ok]):>8.1f}%")
 
     if args.out:
         args.out.write_text(json.dumps(results, indent=2))
