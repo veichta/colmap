@@ -161,15 +161,22 @@ def main():
         w = np.array([
             max(h[2, 2] - h[:2, 2] @ aib, 1e-12) for h, aib in zip(H, A_inv_b)
         ])  # per-frame marginal focal information
-        f_star = float(np.sum(w * np.array(focal)) / np.sum(w))
-        var_f = float(1.0 / np.sum(w))
+        # Robust fusion: strong models can have rare catastrophic per-frame
+        # failures (near-flipped gravity, absurd focals) that destroy std/mean
+        # statistics -- use MAD-trimmed precision weighting.
+        f_arr = np.array(focal)
+        med_f = float(np.median(f_arr))
+        mad = 1.4826 * float(np.median(np.abs(f_arr - med_f)))
+        inlier = np.abs(f_arr - med_f) <= 5.0 * max(mad, 1.0)
+        f_star = float(np.sum(w[inlier] * f_arr[inlier]) / np.sum(w[inlier]))
+        var_f = float(1.0 / np.sum(w[inlier]))
         # Per-frame errors of learned calibrators share a COMMON-MODE bias, which
         # summed informations cannot see: the nominal var_f is grossly
         # overconfident (and the bias does not average out). Floor the shared
         # focal variance at the empirical per-frame spread; the joint blocks
         # below keep the gravity<->focal cross-correlation structure but with
         # this honest focal uncertainty.
-        spread = float(np.std(focal))
+        spread = max(mad, 1.0)
         var_floor = max(var_f, spread**2, 5.0**2)
 
         gravity_cov, gf_cov = [], []
