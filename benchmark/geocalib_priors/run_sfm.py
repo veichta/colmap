@@ -134,6 +134,8 @@ def run_sequence(args, seq: str) -> dict:
     if args.focal_init == "priors":
         tag += ("-finit" + ("-fvgc" if args.focal_vgc else "")
                 + ("-fba" if args.focal_ba else ""))
+    if args.per_image_cameras:
+        tag += "-perimg"
     if args.refine_pp:
         tag += "-refpp"
     if args.ra_only:
@@ -161,8 +163,13 @@ def run_sequence(args, seq: str) -> dict:
     use_joint = (args.joint_ba and args.gravity == "priors"
                  and gf_cov is not None and not args.calibrated)
 
-    f_fused = sigma_fused = spread = focal_vgc_est = None
-    if args.uncalib and args.focal_init == "priors":
+    f_fused = sigma_fused = spread = focal_vgc_est = per_cam_focal = None
+    if args.per_image_cameras and args.focal_init == "priors":
+        fs = np.array([priors[n][3] for n in sel if n in priors])
+        mad = max(1.4826 * float(np.median(np.abs(fs - np.median(fs)))), 5.0)
+        print(f"per-frame focal priors: median {np.median(fs):.2f}, "
+              f"MAD {mad:.2f} (true {fy:.2f})")
+    elif args.uncalib and args.focal_init == "priors":
         fs = np.array([priors[n][3] for n in sel if n in priors])
         spread = float(np.std(fs))
         if shared_focal is not None:
@@ -197,10 +204,29 @@ def run_sequence(args, seq: str) -> dict:
             camera_model="PINHOLE", camera_params=f"{fx},{fy},{cx},{cy}"
         )
     t0 = time.time()
+    camera_mode = (pycolmap.CameraMode.PER_IMAGE if args.per_image_cameras
+                   else pycolmap.CameraMode.SINGLE)
     pycolmap.extract_features(
-        db, img_dir, camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader_opts
+        db, img_dir, camera_mode=camera_mode, reader_options=reader_opts
     )
-    if args.uncalib and args.focal_vgc and f_fused is not None:
+    if args.per_image_cameras and args.focal_init == "priors":
+        # each image's own camera gets its own PER-FRAME focal prior
+        per_cam_focal = {}
+        with pycolmap.Database.open(db) as database:
+            cams = {c.camera_id: c for c in database.read_all_cameras()}
+            for image in database.read_all_images():
+                pr = priors.get(image.name)
+                if pr is None:
+                    continue
+                f_i, s_i = float(pr[3]), max(float(pr[4]), mad)
+                cam_db = cams[image.camera_id]
+                p = np.array(cam_db.params)
+                p[0] = p[1] = f_i
+                cam_db.params = p
+                database.update_camera(cam_db)
+                per_cam_focal[image.camera_id] = (f_i, s_i)
+        print(f"set per-frame focal priors on {len(per_cam_focal)} cameras")
+    elif args.uncalib and args.focal_vgc and f_fused is not None:
         with pycolmap.Database.open(db) as database:
             for cam_db in database.read_all_cameras():
                 p = np.array(cam_db.params)
@@ -216,7 +242,13 @@ def run_sequence(args, seq: str) -> dict:
         vgc_opts = pycolmap.ViewGraphCalibrationOptions()
         if args.seed >= 0:
             vgc_opts.random_seed = args.seed
-        if args.focal_vgc:
+        if per_cam_focal is not None and args.focal_vgc:
+            vgc_opts.focal_priors = {
+                cid: np.array([f, s * args.vgc_sigma_scale])
+                for cid, (f, s) in per_cam_focal.items()
+            }
+            print(f"VGC per-camera focal priors on {len(per_cam_focal)} cameras")
+        elif args.focal_vgc:
             sigma_vgc = max(spread, 5.0) * args.vgc_sigma_scale
             with pycolmap.Database.open(db) as database:
                 cam_ids = [c.camera_id for c in database.read_all_cameras()]
@@ -226,11 +258,11 @@ def run_sequence(args, seq: str) -> dict:
             print(f"VGC soft focal prior: {f_fused:.2f} +- {sigma_vgc:.2f} px")
         pycolmap.calibrate_view_graph(db, vgc_opts)
         with pycolmap.Database.open(db) as database:
-            for cam_db in database.read_all_cameras():
-                focal_vgc_est = float(np.mean(np.array(cam_db.params)[:2]))
-                print(f"after view-graph calibration: "
-                      f"{[round(float(v), 2) for v in cam_db.params]} "
-                      f"(true {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f})")
+            vgc_focals = [float(np.mean(np.array(c.params)[:2]))
+                          for c in database.read_all_cameras()]
+        focal_vgc_est = float(np.median(vgc_focals))
+        print(f"after view-graph calibration: median focal {focal_vgc_est:.2f} "
+              f"over {len(vgc_focals)} cameras (true {fy:.2f})")
     t2 = time.time()
 
     # --- global mapping options ---
@@ -248,7 +280,12 @@ def run_sequence(args, seq: str) -> dict:
         opts.mapper.skip_retriangulation = True
     if args.refine_pp:
         opts.mapper.bundle_adjustment.refine_principal_point = True
-    if args.focal_ba and not use_joint:
+    if args.focal_ba and per_cam_focal is not None:
+        opts.mapper.bundle_adjustment.focal_priors = {
+            cid: np.array([f, s]) for cid, (f, s) in per_cam_focal.items()
+        }
+        print(f"BA per-camera focal priors on {len(per_cam_focal)} cameras")
+    elif args.focal_ba and not use_joint:
         # scalar BA focal prior; superseded by the joint prior when available
         sigma_ba = max(spread, 5.0)
         with pycolmap.Database.open(db) as database:
@@ -341,11 +378,20 @@ def run_sequence(args, seq: str) -> dict:
         print("NO RECONSTRUCTION")
         return {"seq": seq, "failed": True}
     rec = max(recs.values(), key=lambda r: r.num_images())
-    est = [float(v) for v in list(rec.cameras.values())[0].params]
-    focal_est = float(np.mean(est[:2])) if len(est) >= 2 else est[0]
-    if args.uncalib:
-        print(f"estimated intrinsics: {[round(v, 2) for v in est]} "
-              f"(true {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f})")
+    if args.per_image_cameras:
+        focals = np.array([float(np.mean(np.array(c.params)[:2]))
+                           for c in rec.cameras.values()])
+        focal_est = float(np.median(focals))
+        est = None
+        print(f"estimated per-camera focals: median {focal_est:.2f}, "
+              f"p10/p90 {np.percentile(focals, 10):.1f}/{np.percentile(focals, 90):.1f} "
+              f"over {len(focals)} cameras (true {fy:.2f})")
+    else:
+        est = [float(v) for v in list(rec.cameras.values())[0].params]
+        focal_est = float(np.mean(est[:2])) if len(est) >= 2 else est[0]
+        if args.uncalib:
+            print(f"estimated intrinsics: {[round(v, 2) for v in est]} "
+                  f"(true {fx:.2f},{fy:.2f},{cx:.2f},{cy:.2f})")
 
     # --- gauge-aligned rotation errors + Sim(3)-aligned ATE vs GT ---
     R_est, R_gt, C_est, C_gt, reg_names = [], [], [], [], []
@@ -420,7 +466,7 @@ def run_sequence(args, seq: str) -> dict:
         "focal_vgc": focal_vgc_est,
         "focal_prior": f_fused,
         "intrinsics_est": est,
-        "pp_est": est[-2:] if args.refine_pp else None,
+        "pp_est": est[-2:] if (args.refine_pp and est is not None) else None,
     }
 
 
@@ -484,6 +530,11 @@ def main():
                         default=True,
                         help="keep the GeoCalib focal as a soft prior in BA")
     parser.add_argument("--vgc_sigma_scale", type=float, default=1.0)
+    parser.add_argument("--per_image_cameras", action="store_true",
+                        help="one camera per image with its own PER-FRAME focal prior "
+                             "(no shared-focal fusion): tests the per-frame estimates "
+                             "directly; generalizes to unordered collections but "
+                             "discards the (true, for video) sharedness constraint")
     parser.add_argument("--ra_only", action="store_true",
                         help="skip all stages after rotation averaging (isolates the "
                              "effect of gravity priors on rotation averaging)")
@@ -505,6 +556,13 @@ def main():
     if args.gravity == "none":
         args.gravity_ba = args.joint_ba = False
     if args.calibrated:
+        args.joint_ba = False
+    if args.per_image_cameras:
+        # per-frame focal priors replace the shared-focal path entirely; the
+        # stored joint blocks are cross-covariances against the SHARED focal,
+        # so BA falls back to separate gravity + per-camera focal priors.
+        args.calibrated = False
+        args.uncalib = True
         args.joint_ba = False
 
     if args.gravity == "priors" or args.focal_init == "priors":
