@@ -128,6 +128,10 @@ def main():
                 inv_s = 2.0 * f_unc_all[b] / np.sqrt(max(cov[2, 2], 1e-12))
                 cov[2, :] *= inv_s
                 cov[:, 2] *= inv_s
+            if not (np.all(np.isfinite(vec_all[b])) and np.isfinite(f_all[b])
+                    and np.all(np.isfinite(cov))):
+                print(f"skipping {frame.name}: non-finite prior")
+                continue
             names.append(frame.name)
             g_down.append(-vec_all[b])
             rps.append((float(rp_all[b, 0]), float(rp_all[b, 1])))
