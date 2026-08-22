@@ -146,6 +146,28 @@ Takeaways:
   back to focal-only priors.
 - The GT-gravity row shows the headroom a better gravity model would unlock.
 
+## Results (per-image cameras)
+
+`--per_image_cameras` uses the per-frame focal estimates **directly** — one camera per
+image with its own soft focal prior in VGC and BA — instead of fusing them into one
+shared focal. This is the configuration for unordered collections; for video it
+deliberately discards the (true) sharedness constraint. Mean AUC@0.5/1/2 (x100) and
+registration, public `pinhole` weights:
+
+| arm | EuRoC | TartanAir |
+|---|---|---|
+| per-image baseline (no priors) | 3.1 / 13.9 / 27.1 (96.2%) | 13.2 / 20.1 / 29.6 (98.0%) |
+| + per-frame focal priors | 8.7 / 23.4 / 40.6 (96.1%) | 31.3 / 44.6 / 53.2 (94.4%) |
+| + gravity priors too | **15.0 / 34.1 / 53.8** (94.0%) | **34.3 / 49.2 / 60.2** (94.7%) |
+
+Observations: the per-image baseline is far worse than even the shared no-prior
+baseline (estimating N free focals is a much harder problem), per-frame priors recover
+most of it, and — unlike in the shared mode — **gravity priors help clearly on both
+datasets here** (+13.2 / +7.0 AUC@2): with weaker per-camera geometry, the gravity
+information earns its keep everywhere. Comparing the best per-image arm to the best
+shared arm quantifies the value of the sharedness constraint itself at roughly
+10–15 AUC@2 points on these video benchmarks.
+
 ## Results (calibrated ablation)
 
 GT intrinsics + `--fprior` gravity priors (gravity-only LM solve, ~1.0 deg median vs
