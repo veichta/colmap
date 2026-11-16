@@ -73,11 +73,23 @@ def main():
     parser.add_argument("--batch", type=int, default=16,
                         help="frames per batched forward+LM (independent per-frame "
                              "solves, batched for GPU utilization)")
+    parser.add_argument("--ckpt", type=Path, default=None,
+                        help="siclib research experiment dir (e.g. geocalib2-lines), run "
+                             "through siclib's calibrate(); overrides --weights, needs the "
+                             "GeoCalib repo on PYTHONPATH")
     parser.add_argument("--out", default="priors.npz",
                         help="output file name, written inside --seq_dir")
     args = parser.parse_args()
 
-    model = GeoCalib(args.weights).to(args.device)
+    if args.ckpt is not None:
+        # siclib's own entry point (GeoCalib >= 407691a): loads the checkpoint, resizes
+        # (320 px short side, /32) and returns camera AND covariance in original pixels.
+        from siclib.models.extractor import GeoCalib as SiclibGeoCalib
+
+        model = SiclibGeoCalib(weights=str(args.ckpt))
+        model = model.to(args.device)
+    else:
+        model = GeoCalib(args.weights).to(args.device)
 
     prior_focal = None
     if args.fprior:
@@ -125,7 +137,10 @@ def main():
                 # scalar focal_uncertainty (= sqrt(cov_ff)/2 * 1/s), so 1/s is
                 # recovered from it.
                 assert cov.shape == (3, 3), cov.shape
-                inv_s = 2.0 * f_unc_all[b] / np.sqrt(max(cov[2, 2], 1e-12))
+                if args.ckpt is not None:  # siclib: covariance already in original px
+                    inv_s = 1.0
+                else:
+                    inv_s = 2.0 * f_unc_all[b] / np.sqrt(max(cov[2, 2], 1e-12))
                 cov[2, :] *= inv_s
                 cov[:, 2] *= inv_s
             if not (np.all(np.isfinite(vec_all[b])) and np.isfinite(f_all[b])
