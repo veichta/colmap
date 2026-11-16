@@ -183,6 +183,11 @@ void BindSfM(py::module& m) {
                 "(prior_focal, sigma) in pixels; prior'd cameras are refined "
                 "with an added (f - prior)/sigma residual instead of being "
                 "held constant.")
+            .def_readwrite("focal_prior_weight",
+                           &Opts::focal_prior_weight,
+                           "Cost weight of the focal priors relative to the "
+                           "two-view terms (those are scaled by "
+                           "loss_function_scale^2 / 2 via the Cauchy loss).")
             .def_readwrite("cross_validate_prior_focal_lengths",
                            &Opts::cross_validate_prior_focal_lengths)
             .def_readwrite("min_calibrated_pair_ratio",

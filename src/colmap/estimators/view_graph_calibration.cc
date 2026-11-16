@@ -37,6 +37,7 @@
 #include "colmap/util/logging.h"
 #include "colmap/util/threading.h"
 
+#include <cmath>
 #include <mutex>
 
 namespace colmap {
@@ -202,23 +203,26 @@ void ReestimateRelativePoses(
 // Soft focal-length prior residual: (f - prior) / sigma. Used to fuse learned
 // per-camera focal priors (e.g. GeoCalib) with the Fetzer two-view constraints
 // (see ViewGraphCalibrationOptions::focal_priors).
+// Residual sqrt(weight) * (f - prior) / sigma, i.e. cost weight * z^2 / 2.
 struct SoftFocalPriorCostFunctor {
-  SoftFocalPriorCostFunctor(double prior, double sigma)
-      : prior_(prior), inv_sigma_(1.0 / sigma) {}
+  SoftFocalPriorCostFunctor(double prior, double sigma, double weight)
+      : prior_(prior), scale_(std::sqrt(weight) / sigma) {}
 
   template <typename T>
   bool operator()(const T* const focal, T* residual) const {
-    residual[0] = (focal[0] - T(prior_)) * T(inv_sigma_);
+    residual[0] = (focal[0] - T(prior_)) * T(scale_);
     return true;
   }
 
-  static ceres::CostFunction* Create(double prior, double sigma) {
+  static ceres::CostFunction* Create(double prior,
+                                     double sigma,
+                                     double weight) {
     return new ceres::AutoDiffCostFunction<SoftFocalPriorCostFunctor, 1, 1>(
-        new SoftFocalPriorCostFunctor(prior, sigma));
+        new SoftFocalPriorCostFunctor(prior, sigma, weight));
   }
 
   const double prior_;
-  const double inv_sigma_;
+  const double scale_;
 };
 
 // Core Ceres optimization for focal length calibration.
@@ -298,10 +302,12 @@ FocalLengthCalibResult CalibrateFocalLengths(
     const auto prior_it = options.focal_priors.find(camera_id);
     if (prior_it != options.focal_priors.end()) {
       // Soft prior: refine the focal, anchored by (prior, sigma).
-      problem.AddResidualBlock(SoftFocalPriorCostFunctor::Create(
-                                   prior_it->second[0], prior_it->second[1]),
-                               nullptr,
-                               focal_ptr);
+      problem.AddResidualBlock(
+          SoftFocalPriorCostFunctor::Create(prior_it->second[0],
+                                            prior_it->second[1],
+                                            options.focal_prior_weight),
+          nullptr,
+          focal_ptr);
       num_cameras++;
     } else if (camera.has_prior_focal_length) {
       problem.SetParameterBlockConstant(focal_ptr);

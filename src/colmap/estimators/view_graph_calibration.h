@@ -50,6 +50,16 @@ struct ViewGraphCalibrationOptions {
   // instead of holding prior-focal cameras constant.
   std::unordered_map<camera_t, Eigen::Vector2d> focal_priors;
 
+  // Weight of the focal-prior cost 0.5 * ((f - prior) / sigma)^2 relative to
+  // the two-view (Fetzer) terms. Those enter under CauchyLoss(s) with
+  // s = loss_function_scale, i.e. as s^2 / 2 times their Cauchy negative
+  // log-likelihood, so a prior with a calibrated sigma must be scaled by the
+  // same order (s^2 / 2 = 5e-5 for s = 0.01) to be balanced against them; at
+  // weight 1 it dominates the two-view constraints by orders of magnitude.
+  // 1e-5 was best on IMC2023 (1e-4 to 1e-5 within noise). Scale with s^2 if
+  // loss_function_scale is changed.
+  double focal_prior_weight = 1e-5;
+
   // Whether to cross-validate prior focal lengths by checking the ratio of
   // calibrated vs uncalibrated pairs per camera. When enabled, UNCALIBRATED
   // pairs are converted to CALIBRATED if both cameras have reliable priors.
